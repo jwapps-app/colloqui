@@ -12,7 +12,6 @@ services:
 
   api:
     image: ${COLLOQUI_IMAGE:-ghcr.io/jwapps-app/colloqui:latest}
-    container_name: colloqui_api
     restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql+asyncpg://app:${POSTGRES_PASSWORD}@10.213.0.10:5432/app
@@ -30,7 +29,6 @@ services:
 
   db:
     image: postgres:17-alpine
-    container_name: colloqui_db
     restart: unless-stopped
     environment:
       - POSTGRES_USER=app
@@ -49,7 +47,6 @@ services:
 
   backup:
     image: postgres:17-alpine
-    container_name: colloqui_backup
     restart: unless-stopped
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
