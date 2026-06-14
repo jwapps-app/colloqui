@@ -6,6 +6,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import push
 from .db import SessionLocal
 from .models import Notification, Reminder, utcnow
 from .schemas import NotificationOut
@@ -54,7 +55,9 @@ async def notify_user(
             [user_id],
             {"type": "alert", "title": title, "body": body, "data": data},
         )
-    # FUTURE (iOS): await apns.push(user_id, title, body, data)  # both paths
+    # Native iOS push (both inbox items and transient "all"-level alerts).
+    # No-op unless APNs is configured; fire-and-forget, never blocks here.
+    push.schedule(user_id, title, body, data)
     return notification
 
 

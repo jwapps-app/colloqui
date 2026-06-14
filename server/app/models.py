@@ -303,6 +303,22 @@ class Notification(Base):
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class DeviceToken(Base):
+    """An APNs device token for a user's iOS install. One token belongs to one
+    user at a time; re-registering reassigns it. Dead tokens (APNs 410) are
+    pruned on send."""
+
+    __tablename__ = "device_tokens"
+
+    token: Mapped[str] = mapped_column(String(200), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    platform: Mapped[str] = mapped_column(String(16), default="ios")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ChannelRead(Base):
     """Per-user read marker for a channel. Unread = messages after this."""
 

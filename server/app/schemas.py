@@ -119,6 +119,11 @@ class NotifyPrefIn(BaseModel):
     level: str = Field(pattern=r"^(all|mentions|muted)$")
 
 
+class DeviceRegisterIn(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+    platform: str = Field(default="ios", max_length=16)
+
+
 class WebhookIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 

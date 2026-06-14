@@ -516,3 +516,100 @@ async def test_link_previews(client, make_user):
     assert len(m["link_previews"]) == 1
     assert m["link_previews"][0]["title"] == "Example Article"
     assert m["link_previews"][0]["site_name"] == "example.com"
+
+
+async def test_device_registration(client, make_user):
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import DeviceToken
+
+    a_tok, a_id = await make_user("alice")
+    b_tok, b_id = await make_user("bob")
+
+    # Register a token for alice.
+    assert (await client.post("/api/v1/devices", headers=auth(a_tok),
+            json={"token": "TOKENABC", "platform": "ios"})).status_code == 204
+    async with SessionLocal() as db:
+        dt = await db.get(DeviceToken, "TOKENABC")
+        assert dt is not None and str(dt.user_id) == str(a_id)
+
+    # Re-registering the same token to bob reassigns it (upsert — still one row).
+    assert (await client.post("/api/v1/devices", headers=auth(b_tok),
+            json={"token": "TOKENABC"})).status_code == 204
+    async with SessionLocal() as db:
+        rows = (await db.scalars(select(DeviceToken).where(DeviceToken.token == "TOKENABC"))).all()
+        assert len(rows) == 1 and str(rows[0].user_id) == str(b_id)
+
+    # A non-owner can't delete it; the owner can.
+    await client.delete("/api/v1/devices/TOKENABC", headers=auth(a_tok))  # no-op
+    async with SessionLocal() as db:
+        assert await db.get(DeviceToken, "TOKENABC") is not None
+    assert (await client.delete("/api/v1/devices/TOKENABC", headers=auth(b_tok))).status_code == 204
+    async with SessionLocal() as db:
+        assert await db.get(DeviceToken, "TOKENABC") is None
+
+
+async def test_push_apns(monkeypatch, make_user):
+    import time as _time
+
+    import jwt as pyjwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from sqlalchemy import select
+
+    from app import push
+    from app.config import settings
+    from app.db import SessionLocal
+    from app.models import DeviceToken
+
+    # Disabled (and a no-op) until configured.
+    assert push.push_enabled() is False
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    monkeypatch.setattr(settings, "apns_key", pem)
+    monkeypatch.setattr(settings, "apns_key_id", "KEY123")
+    monkeypatch.setattr(settings, "apns_team_id", "TEAM123")
+    monkeypatch.setattr(settings, "apns_topic", "co.jjrrr.colloqui")
+    push._jwt_cache["token"] = None
+    assert push.push_enabled() is True
+
+    # Provider JWT: valid ES256, carries our kid/team.
+    tok = push._provider_jwt(pem, _time.time())
+    assert pyjwt.get_unverified_header(tok) == {"alg": "ES256", "kid": "KEY123", "typ": "JWT"}
+    assert pyjwt.decode(tok, key.public_key(), algorithms=["ES256"])["iss"] == "TEAM123"
+
+    # _deliver posts to every token and prunes the ones APNs rejects (410).
+    _, c_id = await make_user("carol")
+    async with SessionLocal() as db:
+        db.add(DeviceToken(token="LIVE", user_id=c_id, platform="ios"))
+        db.add(DeviceToken(token="DEAD", user_id=c_id, platform="ios"))
+        await db.commit()
+
+    sent: list[str] = []
+
+    class FakeResp:
+        def __init__(self, status): self.status_code = status; self.text = ""
+        def json(self): return {"reason": "Unregistered"} if self.status_code == 410 else {}
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, headers=None, content=None):
+            sent.append(url)
+            return FakeResp(410 if url.endswith("/DEAD") else 200)
+
+    monkeypatch.setattr(push.httpx, "AsyncClient", FakeClient)
+    await push._deliver(c_id, "hi", "there", {"channel_id": "x"})
+
+    assert any(u.endswith("/LIVE") for u in sent) and any(u.endswith("/DEAD") for u in sent)
+    async with SessionLocal() as db:
+        left = [t.token for t in (await db.scalars(
+            select(DeviceToken).where(DeviceToken.user_id == c_id))).all()]
+    assert left == ["LIVE"]  # DEAD was pruned

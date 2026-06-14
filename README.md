@@ -46,6 +46,24 @@ backups all live there.
 | `ORIGIN`           | Exact browser origin, e.g. `https://chat.example.com`                      |
 | `DEV_MODE`         | `true` exposes `/docs` (Swagger). Keep `false` in production.             |
 
+### iOS push (APNs) — optional
+
+Native push for the companion iOS app. All optional; **push is a silent no-op
+until these are set**, so you can ignore them until the app exists. The server
+talks to Apple directly with your own signing key — no third-party push gateway.
+
+| Variable         | What it is                                                              |
+|------------------|------------------------------------------------------------------------|
+| `APNS_KEY_PATH`  | Path to your APNs auth key (`.p8`) mounted into the container, **or**…  |
+| `APNS_KEY`       | …the `.p8` PEM contents inline. Never commit the key.                   |
+| `APNS_KEY_ID`    | The key's Key ID (from the Apple Developer portal)                      |
+| `APNS_TEAM_ID`   | Your Apple Developer Team ID                                            |
+| `APNS_TOPIC`     | The app's bundle id, e.g. `co.jjrrr.colloqui`                           |
+| `APNS_SANDBOX`   | `true` for dev/TestFlight builds; `false` (default) for App Store       |
+
+The iOS app registers its device token via `POST /api/v1/devices`; dead tokens are
+pruned automatically. Per-channel mute is respected before a push is ever sent.
+
 ### About passkeys vs. passwords and addresses
 
 Passkeys are a browser security feature bound to **one origin** and only work in
