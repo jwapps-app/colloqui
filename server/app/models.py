@@ -3,11 +3,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
     Integer,
     LargeBinary,
+    Sequence,
     String,
     Text,
 )
@@ -317,6 +319,28 @@ class DeviceToken(Base):
     platform: Mapped[str] = mapped_column(String(16), default="ios")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MessageChange(Base):
+    """Change-log for offline sync: one row per message that has been created,
+    edited, reacted to, pinned, checked, or deleted since the feature shipped.
+    `seq` is a monotonic cursor (from the `change_seq` sequence); a client polls
+    `GET /sync?since=<seq>` to pull just what changed. One row per message
+    (upserted) keeps the table bounded; the client fetches a message's current
+    state, so only the latest change matters."""
+
+    __tablename__ = "message_changes"
+
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"), index=True
+    )
+    # Bind the sequence to the metadata so create_all (fresh installs + tests)
+    # creates it; the migration also makes it for existing DBs.
+    seq: Mapped[int] = mapped_column(BigInteger, Sequence("change_seq"), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ChannelRead(Base):

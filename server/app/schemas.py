@@ -171,6 +171,9 @@ class MessageIn(BaseModel):
     file_id: uuid.UUID | None = None
     reply_to_id: uuid.UUID | None = None
     thread_root_id: uuid.UUID | None = None
+    # Client-supplied id for idempotent offline send: replaying the same id
+    # returns the existing message instead of creating a duplicate.
+    id: uuid.UUID | None = None
 
 
 class ReactionIn(BaseModel):
@@ -208,6 +211,7 @@ class MessageOut(BaseModel):
     reply_to: ReplyPreview | None = None
     pinned: bool = False
     link_previews: list[LinkPreviewOut] = []
+    deleted_at: datetime | None = None  # set only in the sync feed, for tombstones
     thread_root_id: uuid.UUID | None = None
     reply_count: int = 0  # replies in this message's thread (roots only)
     thread_last_at: datetime | None = None
@@ -279,6 +283,16 @@ class ThreadDigestOut(BaseModel):
     channel_name: str | None
     is_dm: bool
     root: MessageOut  # carries reply_count, thread_last_at, thread_repliers
+
+
+class SyncOut(BaseModel):
+    """Delta of message changes since `cursor`. Deleted messages come through
+    with `deleted_at` set (tombstones). Call again with the returned `cursor`
+    while `has_more` is true."""
+
+    messages: list[MessageOut]
+    cursor: int
+    has_more: bool
 
 
 class AdminUserOut(UserOut):

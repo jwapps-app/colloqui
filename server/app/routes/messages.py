@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import and_, delete, func, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from ..models import (
     File,
     LinkPreview,
     Message,
+    MessageChange,
     Reaction,
     TaskCompletion,
     User,
@@ -40,6 +42,7 @@ from ..schemas import (
     ReactionIn,
     ReplyPreview,
     SearchHit,
+    SyncOut,
     ThreadDigestOut,
     UserOut,
 )
@@ -97,11 +100,34 @@ def message_out(
         reply_to=reply,
         pinned=message.pinned_at is not None,
         link_previews=previews or [],
+        deleted_at=message.deleted_at,
         thread_root_id=message.thread_root_id,
         reply_count=thread.get("count", 0),
         thread_last_at=thread.get("last_at"),
         thread_repliers=thread.get("repliers", []),
     )
+
+
+async def record_change(db: AsyncSession, message: Message) -> None:
+    """Stamp a message into the offline-sync change-log (upsert, one row per
+    message) with a fresh monotonic seq. Call after any change to a message's
+    rendered state (create/edit/delete/checkbox/pin/reaction)."""
+    seq = await db.scalar(select(func.nextval("change_seq")))
+    now = utcnow()
+    stmt = (
+        pg_insert(MessageChange)
+        .values(
+            message_id=message.id,
+            channel_id=message.channel_id,
+            seq=seq,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=["message_id"],
+            set_={"seq": seq, "channel_id": message.channel_id, "updated_at": now},
+        )
+    )
+    await db.execute(stmt)
 
 
 async def thread_meta_for(
@@ -566,6 +592,51 @@ async def list_messages(
     ][::-1]  # oldest first
 
 
+@router.get("/sync", response_model=SyncOut)
+async def sync(
+    since: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> SyncOut:
+    """Offline-sync delta: every message in the caller's channels that changed
+    after the `since` cursor, as full message objects (deleted ones carry
+    `deleted_at` for tombstoning). Bootstrap with the normal history endpoints,
+    then poll this; call again with the returned `cursor` while `has_more`."""
+    mine = select(ChannelMember.channel_id).where(ChannelMember.user_id == user.id)
+    rows = (
+        await db.execute(
+            select(MessageChange.seq, Message, User, File)
+            .join(Message, Message.id == MessageChange.message_id)
+            .join(User, User.id == Message.sender_id)
+            .outerjoin(File, File.id == Message.file_id)
+            .where(MessageChange.seq > since, MessageChange.channel_id.in_(mine))
+            .order_by(MessageChange.seq)
+            .limit(limit)
+        )
+    ).all()
+    live = [(m, u, f) for _, m, u, f in rows if m.deleted_at is None]
+    live_msgs = [m for m, _, _ in live]
+    ids = [m.id for m in live_msgs]
+    aggs = await reactions_for(db, ids)
+    comps = await completions_for(db, ids)
+    replies = await reply_previews_for(db, live_msgs)
+    threads = await thread_meta_for(db, ids)
+    previews = await previews_for(db, live_msgs)
+    out: list[MessageOut] = []
+    cursor = since
+    for seq, m, u, f in rows:
+        cursor = seq
+        if m.deleted_at is not None:
+            out.append(message_out(m, u))  # tombstone — deleted_at carries through
+        else:
+            out.append(
+                message_out(m, u, f, aggs.get(m.id), comps.get(m.id),
+                            replies.get(m.id), threads.get(m.id), previews.get(m.id))
+            )
+    return SyncOut(messages=out, cursor=cursor, has_more=len(rows) == limit)
+
+
 @router.get("/channels/{channel_id}/threads", response_model=list[MessageOut])
 async def channel_threads(
     channel_id: uuid.UUID,
@@ -762,6 +833,20 @@ async def send_message(
     user: User = Depends(get_current_user),
 ) -> MessageOut:
     channel = await require_member(db, channel_id, user)
+    if body.id is not None:
+        # Idempotent offline send: replaying the same client id returns the
+        # already-created message instead of duplicating it.
+        existing = await db.get(Message, body.id)
+        if existing is not None:
+            if existing.sender_id != user.id or existing.channel_id != channel_id:
+                raise HTTPException(409, "Message id already exists")
+            ex_file = await db.get(File, existing.file_id) if existing.file_id else None
+            aggs = (await reactions_for(db, [existing.id])).get(existing.id)
+            comps = (await completions_for(db, [existing.id])).get(existing.id)
+            reply = (await reply_previews_for(db, [existing])).get(existing.id)
+            thr = (await thread_meta_for(db, [existing.id])).get(existing.id)
+            prev = (await previews_for(db, [existing])).get(existing.id)
+            return message_out(existing, user, ex_file, aggs, comps, reply, thr, prev)
     content = body.content.strip()
     file = None
     if body.file_id is not None:
@@ -796,8 +881,11 @@ async def send_message(
         reply_to_id=body.reply_to_id,
         thread_root_id=thread_root_id,
     )
+    if body.id is not None:
+        message.id = body.id
     db.add(message)
     await db.flush()
+    await record_change(db, message)
     reply = (await reply_previews_for(db, [message])).get(message.id)
     out = message_out(message, user, file, None, None, reply)
     await broadcast(
@@ -873,6 +961,7 @@ async def toggle_checkbox(
     elif not body.checked and existing is not None:
         await db.delete(existing)
     await db.flush()
+    await record_change(db, message)
     sender = await db.get(User, message.sender_id)
     file = await db.get(File, message.file_id) if message.file_id else None
     aggs = (await reactions_for(db, [message.id])).get(message.id)
@@ -929,6 +1018,7 @@ async def _set_pin(
     await require_member(db, message.channel_id, user)
     message.pinned_at = utcnow() if pinned else None
     message.pinned_by = user.id if pinned else None
+    await record_change(db, message)
     sender = await db.get(User, message.sender_id)
     file = await db.get(File, message.file_id) if message.file_id else None
     aggs = (await reactions_for(db, [message.id])).get(message.id)
@@ -982,6 +1072,7 @@ async def toggle_reaction(
     else:
         db.add(Reaction(message_id=message_id, user_id=user.id, emoji=body.emoji))
     await db.flush()
+    await record_change(db, message)
     aggs = (await reactions_for(db, [message_id])).get(message_id, [])
     await broadcast(
         db,
@@ -1018,6 +1109,7 @@ async def edit_message(
     await db.execute(
         delete(TaskCompletion).where(TaskCompletion.message_id == message.id)
     )
+    await record_change(db, message)
     file = await db.get(File, message.file_id) if message.file_id else None
     aggs = (await reactions_for(db, [message.id])).get(message.id)
     reply = (await reply_previews_for(db, [message])).get(message.id)
@@ -1054,6 +1146,7 @@ async def delete_message(
         if file:
             await db.delete(file)
             (Path(settings.upload_dir) / str(file.id)).unlink(missing_ok=True)
+    await record_change(db, message)
     await broadcast(
         db,
         message.channel_id,

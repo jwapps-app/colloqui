@@ -613,3 +613,80 @@ async def test_push_apns(monkeypatch, make_user):
         left = [t.token for t in (await db.scalars(
             select(DeviceToken).where(DeviceToken.user_id == c_id))).all()]
     assert left == ["LIVE"]  # DEAD was pruned
+
+
+async def test_sync_feed(client, make_user):
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("alice")
+    b_tok, b_id = await make_user("bob")
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin_tok), json={"name": "SY"})).json()
+    for uid in (a_id, b_id):
+        await client.post(f"/api/v1/spaces/{sp['id']}/members", headers=auth(admin_tok),
+                          json={"user_id": str(uid)})
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "c", "space_id": sp["id"]})).json()
+    await client.post(f"/api/v1/channels/{ch['id']}/members", headers=auth(a_tok),
+                      json={"user_id": str(b_id)})
+    # Private channel: only the creator is enrolled, so bob is NOT a member.
+    other = (await client.post("/api/v1/channels", headers=auth(a_tok),
+             json={"name": "c2", "space_id": sp["id"], "is_private": True})).json()
+
+    async def bob_sync(since):
+        return (await client.get(f"/api/v1/sync?since={since}", headers=auth(b_tok))).json()
+
+    # Nothing yet.
+    s = await bob_sync(0)
+    assert s["messages"] == [] and s["has_more"] is False
+    cur = s["cursor"]
+
+    # A new message shows up as a delta for the member.
+    m1 = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+          json={"content": "hello"})).json()
+    s = await bob_sync(cur)
+    assert [x["id"] for x in s["messages"]] == [m1["id"]]
+    cur = s["cursor"]
+
+    # Activity in a channel bob isn't in is filtered out for him…
+    await client.post(f"/api/v1/channels/{other['id']}/messages", headers=auth(a_tok),
+                      json={"content": "secret"})
+    assert (await bob_sync(cur))["messages"] == []
+    # …but alice (a member of `other`) does receive it.
+    sa = (await client.get(f"/api/v1/sync?since={cur}", headers=auth(a_tok))).json()
+    assert any(x["content"] == "secret" for x in sa["messages"])
+
+    # An edit re-surfaces the message with new content.
+    await client.patch(f"/api/v1/messages/{m1['id']}", headers=auth(a_tok),
+                       json={"content": "edited"})
+    s = await bob_sync(cur)
+    assert [x["id"] for x in s["messages"]] == [m1["id"]]
+    assert s["messages"][0]["content"] == "edited"
+    cur = s["cursor"]
+
+    # A delete comes through as a tombstone (deleted_at set).
+    await client.delete(f"/api/v1/messages/{m1['id']}", headers=auth(a_tok))
+    s = await bob_sync(cur)
+    assert [x["id"] for x in s["messages"]] == [m1["id"]]
+    assert s["messages"][0]["deleted_at"] is not None
+
+
+async def test_idempotent_send(client, make_user):
+    import uuid as _uuid
+
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("alice")
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin_tok), json={"name": "ID"})).json()
+    await client.post(f"/api/v1/spaces/{sp['id']}/members", headers=auth(admin_tok),
+                      json={"user_id": str(a_id)})
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "c", "space_id": sp["id"]})).json()
+
+    cid = str(_uuid.uuid4())
+    first = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+             json={"id": cid, "content": "queued offline"})).json()
+    assert first["id"] == cid
+    # Replaying the same client id returns the same message, doesn't duplicate.
+    again = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+             json={"id": cid, "content": "queued offline"})).json()
+    assert again["id"] == cid
+    msgs = (await client.get(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok))).json()
+    assert sum(1 for m in msgs if m["id"] == cid) == 1

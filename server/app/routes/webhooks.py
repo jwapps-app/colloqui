@@ -12,7 +12,7 @@ from ..models import Channel, ChannelMember, Message, User, Webhook, utcnow
 from ..schemas import WebhookCreatedOut, WebhookIn, WebhookOut, WebhookPostIn
 from ..security import RateLimiter, hash_token, new_token
 from .channels import require_member
-from .messages import _notify_for_message, broadcast, message_out
+from .messages import _notify_for_message, broadcast, message_out, record_change
 
 router = APIRouter(prefix="/api/v1", tags=["webhooks"])
 # Ingest lives at a short, prefix-less URL (/hooks/{token}) for clean webhook URLs.
@@ -122,6 +122,7 @@ async def ingest(
     db.add(message)
     hook.last_used_at = utcnow()
     await db.flush()
+    await record_change(db, message)
     out = message_out(message, sender)
     await broadcast(
         db, channel.id, {"type": "message.created", "message": jsonable_encoder(out)}
