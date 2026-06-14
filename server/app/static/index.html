@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#15171c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Colloqui</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css?v=76">
+</head>
+<body>
+
+<div id="auth" class="center hidden">
+  <div class="card">
+    <h1>Colloqui</h1>
+    <div id="login-view">
+      <input id="login-username" placeholder="username" autocomplete="username webauthn">
+      <input type="password" id="login-password" placeholder="password (if you have one)" autocomplete="current-password">
+      <button id="login-password-btn" class="primary">Sign in</button>
+      <button id="login-btn">Sign in with passkey</button>
+      <p class="muted">New here? <a href="#" id="show-register">Register with an invite</a></p>
+    </div>
+    <div id="register-view" class="hidden">
+      <input id="reg-invite" placeholder="invite code (leave empty for first user)">
+      <input id="reg-username" placeholder="username" autocomplete="username">
+      <input id="reg-display" placeholder="display name">
+      <input type="password" id="reg-password" placeholder="password (or leave blank for a passkey)" autocomplete="new-password">
+      <button id="register-password-btn" class="primary">Create account with password</button>
+      <button id="register-btn">Create with a passkey instead</button>
+      <p class="muted">Recovering an account? Use your existing username.</p>
+      <p class="muted"><a href="#" id="show-login">Back to sign in</a></p>
+    </div>
+    <p id="auth-error" class="error"></p>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <aside>
+    <header id="sidebar-top">
+      <span class="brand">Colloqui <small id="ver">v76</small></span>
+      <span>
+        <button id="threads-btn" title="Threads you're in">🧵</button>
+        <button id="pins-btn" title="Pinned messages">📌</button>
+        <button id="tasks-btn" title="Open tasks">✅</button>
+        <button id="notifs-btn" title="Reminders &amp; notifications">🔔<span id="notif-badge" class="btn-badge hidden"></span></button>
+      </span>
+    </header>
+    <form id="search-form">
+      <input id="search-input" placeholder="Search messages…" maxlength="100">
+    </form>
+    <div class="sidebar-scroll">
+      <div id="spaces-container"></div>
+      <div class="section">
+        <h3>Direct messages <button id="new-dm" title="Start a DM">+</button></h3>
+        <ul id="dm-list"></ul>
+      </div>
+    </div>
+    <footer id="sidebar-footer">
+      <span id="me-name" title="Your account"></span>
+      <span>
+        <button id="settings-btn" title="Settings">⚙️</button>
+        <button id="logout-btn" title="Sign out"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button>
+      </span>
+    </footer>
+  </aside>
+  <main>
+    <header>
+      <button id="back-btn" title="Back to channels">←</button>
+      <span id="channel-title">Select a channel</span>
+      <span id="channel-topic" class="topic"></span>
+      <span id="channel-actions" class="hidden">
+        <button id="info-btn" title="Channel info: threads, pinned, tasks, reminders">📋</button>
+        <button id="members-btn" title="Members">👥</button>
+        <button id="edit-channel-btn" title="Rename / set topic">✎</button>
+      </span>
+    </header>
+    <div id="messages"></div>
+    <div id="typing"></div>
+    <form id="send-form">
+      <input type="file" id="file-input" class="hidden">
+      <div id="edit-banner" class="hidden">✎ Editing message <button type="button" id="edit-cancel">Cancel</button></div>
+      <div id="reply-banner" class="hidden">
+        <span id="reply-banner-text"></span>
+        <button type="button" id="reply-cancel">✕</button>
+      </div>
+      <div id="toolbar">
+        <button type="button" data-cmd="bold" title="Bold (⌘B)" disabled><b>B</b></button>
+        <button type="button" data-cmd="italic" title="Italic (⌘I)" disabled><i>I</i></button>
+        <button type="button" data-cmd="strikeThrough" title="Strikethrough" disabled><s>S</s></button>
+        <button type="button" data-insert="- " title="Bullet list" disabled>•</button>
+        <button type="button" data-insert="1. " title="Numbered list" disabled>1.</button>
+        <button type="button" data-insert="[ ] " title="Task checklist" disabled>☐</button>
+        <button type="button" data-insert="&gt; " title="Quote" disabled>❝</button>
+      </div>
+      <div class="composer-row">
+        <button type="button" id="attach-btn" title="Attach a file" disabled>📎</button>
+        <div id="send-input" contenteditable="false" data-placeholder="Message…"></div>
+        <button class="primary" disabled id="send-btn">Send</button>
+      </div>
+    </form>
+    <div id="mention-box" class="hidden"></div>
+  </main>
+  <aside id="preview-pane" class="hidden">
+    <header>
+      <h2 id="viewer-title">Preview</h2>
+      <span class="pane-actions">
+        <button id="viewer-download">Download</button>
+        <button id="viewer-close">✕</button>
+      </span>
+    </header>
+    <div id="viewer-content"></div>
+  </aside>
+  <aside id="info-pane" class="hidden">
+    <header>
+      <h2 id="info-title">Channel</h2>
+      <span class="pane-actions">
+        <button id="info-close">✕</button>
+      </span>
+    </header>
+    <div id="info-content">
+      <section>
+        <h3>Notifications</h3>
+        <div id="notify-pref" class="seg"></div>
+      </section>
+      <section>
+        <h3>Threads</h3>
+        <ul id="info-threads"></ul>
+      </section>
+      <section>
+        <h3>Pinned messages</h3>
+        <ul id="info-pins"></ul>
+      </section>
+      <section>
+        <h3>Open tasks</h3>
+        <ul id="info-tasks"></ul>
+      </section>
+      <section>
+        <h3>Your reminders</h3>
+        <ul id="info-reminders"></ul>
+      </section>
+      <section id="info-webhooks-section" class="hidden">
+        <h3>Webhooks <button id="webhook-add" title="Create an incoming webhook">+</button></h3>
+        <ul id="info-webhooks"></ul>
+      </section>
+    </div>
+  </aside>
+  <aside id="thread-pane" class="hidden">
+    <header>
+      <h2 id="thread-title">Thread</h2>
+      <span class="pane-actions">
+        <button id="thread-close">✕</button>
+      </span>
+    </header>
+    <div id="thread-content"></div>
+    <form id="thread-form">
+      <textarea id="thread-input" rows="1" placeholder="Reply in thread…" maxlength="4000"></textarea>
+      <button type="submit" class="primary" id="thread-send">Send</button>
+    </form>
+  </aside>
+</div>
+
+<div id="account" class="overlay hidden">
+  <div class="panel">
+    <header>
+      <h2>Your account</h2>
+      <button id="account-close">✕</button>
+    </header>
+    <section>
+      <h3>Profile</h3>
+      <div class="row">
+        <input id="profile-display" maxlength="64" placeholder="display name">
+        <button id="profile-save">Save</button>
+      </div>
+      <div class="row profile-photo-row">
+        <input type="file" id="avatar-input" class="hidden" accept="image/png,image/jpeg,image/webp,image/gif">
+        <button id="avatar-btn">Change photo</button>
+      </div>
+    </section>
+    <section>
+      <h3>My passkeys</h3>
+      <ul id="passkey-list"></ul>
+      <button id="add-passkey">Add a passkey</button>
+      <p class="muted">Add one per device you sign in from, or as a backup.</p>
+    </section>
+    <section>
+      <h3>Password</h3>
+      <p id="pw-state" class="muted"></p>
+      <input type="password" id="pw-current" class="full hidden" placeholder="current password" autocomplete="current-password">
+      <input type="password" id="pw-new" class="full" placeholder="new password (min 8 characters)" autocomplete="new-password">
+      <div class="row">
+        <button id="pw-save">Save password</button>
+        <button id="pw-remove" class="hidden">Remove password</button>
+      </div>
+    </section>
+    <section>
+      <h3>Display</h3>
+      <label class="toggle-row">
+        <input type="checkbox" id="compact-toggle">
+        <span>Compact messages</span>
+      </label>
+    </section>
+    <section>
+      <h3>Calendar sync</h3>
+      <p class="muted">Subscribe to this link in Google, Apple, or Outlook Calendar to see your reminders there. (Read-only; Google can be slow to refresh.)</p>
+      <div class="row">
+        <input id="calendar-url" readonly>
+        <button id="calendar-copy">Copy</button>
+      </div>
+      <button id="calendar-regen">Regenerate link</button>
+    </section>
+    <section>
+      <h3>Active sessions</h3>
+      <ul id="session-list"></ul>
+    </section>
+  </div>
+</div>
+
+<div id="settings" class="overlay hidden">
+  <div class="panel">
+    <header>
+      <h2>Settings</h2>
+      <button id="settings-close">✕</button>
+    </header>
+    <section id="admin-spaces-section">
+      <h3>Spaces</h3>
+      <div class="row">
+        <input id="new-space-name" maxlength="50" placeholder="New space name">
+        <button id="new-space-btn">Create</button>
+      </div>
+      <ul id="admin-space-list"></ul>
+    </section>
+    <section id="admin-users-section">
+      <h3>Users</h3>
+      <button id="new-user-btn">Create user</button>
+      <div id="new-user-out" class="invite-out"></div>
+      <ul id="admin-user-list"></ul>
+    </section>
+    <section id="admin-channels-section">
+      <h3>Channels</h3>
+      <ul id="admin-channel-list"></ul>
+      <p class="muted">Deleting a channel permanently removes all of its messages and files.</p>
+    </section>
+    <section id="admin-invites-section">
+      <h3>Invites</h3>
+      <button id="new-invite">Create invite</button>
+      <button id="new-recovery">Recovery invite</button>
+      <div id="invite-out" class="invite-out"></div>
+      <ul id="admin-invite-list"></ul>
+    </section>
+  </div>
+</div>
+
+<div id="notifs" class="overlay page hidden">
+  <div class="panel">
+    <header>
+      <h2>Reminders &amp; notifications</h2>
+      <button id="notifs-close">✕</button>
+    </header>
+    <section>
+      <h3>New reminder</h3>
+      <div class="row">
+        <input id="rem-text" maxlength="500" placeholder="What should I remind you about?">
+        <button id="rem-add" class="primary">Add</button>
+      </div>
+    </section>
+    <section>
+      <h3>Pending reminders</h3>
+      <ul id="rem-list"></ul>
+    </section>
+    <section>
+      <h3>Recent notifications</h3>
+      <ul id="notif-list"></ul>
+    </section>
+  </div>
+</div>
+
+<div id="tasks" class="overlay page hidden">
+  <div class="panel">
+    <header>
+      <h2>Open tasks</h2>
+      <button id="tasks-close">✕</button>
+    </header>
+    <section>
+      <ul id="task-list"></ul>
+    </section>
+  </div>
+</div>
+
+<div id="threads-inbox" class="overlay page hidden">
+  <div class="panel">
+    <header>
+      <h2>Threads</h2>
+      <button id="threads-close">✕</button>
+    </header>
+    <section>
+      <ul id="threads-list"></ul>
+    </section>
+  </div>
+</div>
+
+<div id="pins" class="overlay page hidden">
+  <div class="panel">
+    <header>
+      <h2>Pinned messages</h2>
+      <button id="pins-close">✕</button>
+    </header>
+    <section>
+      <ul id="pins-list"></ul>
+    </section>
+  </div>
+</div>
+
+<div id="dialog" class="overlay hidden">
+  <div class="panel narrow">
+    <h2 id="dialog-title" class="hidden"></h2>
+    <p id="dialog-message" class="dialog-message"></p>
+    <input id="dialog-input" class="full hidden" maxlength="500">
+    <textarea id="dialog-textarea" class="full hidden" maxlength="4000"></textarea>
+    <div class="dialog-actions">
+      <button id="dialog-cancel">Cancel</button>
+      <button id="dialog-ok" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="when" class="overlay hidden">
+  <div class="panel narrow">
+    <header>
+      <h2>Remind me…</h2>
+      <button id="when-cancel">✕</button>
+    </header>
+    <div class="quick-grid">
+      <button data-mins="10">In 10 minutes</button>
+      <button data-mins="30">In 30 minutes</button>
+      <button data-mins="60">In 1 hour</button>
+      <button data-mins="180">In 3 hours</button>
+      <button data-special="evening">This evening · 6:00 PM</button>
+      <button data-special="tomorrow">Tomorrow · 9:00 AM</button>
+    </div>
+    <section>
+      <h3>Or pick a date &amp; time</h3>
+      <input type="date" id="when-date" class="full">
+      <div class="row">
+        <select id="when-hour"></select>
+        <select id="when-min"></select>
+        <button id="when-set" class="primary">Set</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div id="space" class="overlay hidden">
+  <div class="panel">
+    <header>
+      <h2 id="space-title">Manage space</h2>
+      <button id="space-close">✕</button>
+    </header>
+    <section>
+      <h3>Name</h3>
+      <div class="row">
+        <input id="space-name" maxlength="50">
+        <button id="space-save">Save</button>
+      </div>
+    </section>
+    <section>
+      <h3>Members</h3>
+      <ul id="space-member-list"></ul>
+      <div class="row">
+        <input id="space-add-input" placeholder="username to add" maxlength="32">
+        <button id="space-add-btn">Add</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div id="members" class="overlay hidden">
+  <div class="panel">
+    <header>
+      <h2 id="members-title">Members</h2>
+      <button id="members-close">✕</button>
+    </header>
+    <section>
+      <ul id="member-list"></ul>
+      <div class="row" id="member-add-row">
+        <input id="member-add-input" placeholder="username to add" maxlength="32">
+        <button id="member-add-btn">Add</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script src="/app.js?v=76"></script>
+</body>
+</html>

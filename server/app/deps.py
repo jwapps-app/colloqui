@@ -1,0 +1,51 @@
+from datetime import datetime, timezone
+
+from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .db import get_db
+from .models import Session as AuthSession
+from .models import User
+from .security import RateLimiter, hash_token
+
+auth_limiter = RateLimiter(limit=30, window_seconds=60)
+
+
+def rate_limit_auth(request: Request) -> None:
+    # Behind Cloudflare Tunnel every request has the tunnel's IP; switch this
+    # to the CF-Connecting-IP header at production deploy time.
+    ip = request.client.host if request.client else "unknown"
+    if not auth_limiter.allow(ip):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts")
+
+
+async def user_from_token(db: AsyncSession, token: str | None) -> User | None:
+    if not token:
+        return None
+    session = await db.scalar(
+        select(AuthSession).where(AuthSession.token_hash == hash_token(token))
+    )
+    now = datetime.now(timezone.utc)
+    if session is None or session.revoked or session.expires_at < now:
+        return None
+    user = await db.get(User, session.user_id)
+    if user is None or user.disabled:
+        return None
+    session.last_seen_at = now
+    return user
+
+
+async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
+    auth = request.headers.get("authorization", "")
+    token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else None
+    user = await user_from_token(db, token)
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
+    return user
+
+
+async def get_admin_user(user: User = Depends(get_current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin only")
+    return user

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        working-directory: server
+        run: pip install -r requirements-dev.txt
+
+      - name: Syntax-check web client JS
+        run: node --check server/app/static/app.js
+
+      - name: Run tests
+        working-directory: server
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+        run: python -m pytest -q

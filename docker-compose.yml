@@ -1,0 +1,60 @@
+services:
+
+  api:
+    build: ./server
+    container_name: colloqui_api
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://app:${POSTGRES_PASSWORD}@db:5432/app
+      - RP_ID=${RP_ID}
+      - ORIGIN=${ORIGIN}
+      - DEV_MODE=${DEV_MODE:-false}
+    ports:
+      - "${API_PORT:-3300}:8000"
+    volumes:
+      - ./data/uploads:/srv/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - colloqui_net
+
+  db:
+    image: postgres:17-alpine
+    container_name: colloqui_db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=app
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=app
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - colloqui_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backup:
+    image: postgres:17-alpine
+    container_name: colloqui_backup
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./backup.sh:/backup.sh:ro
+      - ./data:/data:ro
+      - ./data/backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - colloqui_net
+    # Daily snapshot; runs one immediately on (re)start.
+    entrypoint: ["sh", "-c", "while true; do sh /backup.sh || echo '[backup] FAILED'; sleep 86400; done"]
+
+networks:
+  colloqui_net:
+    name: colloqui_net
