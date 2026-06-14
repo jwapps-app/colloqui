@@ -14,6 +14,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "channel_notify_prefs" in sa.inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "channel_notify_prefs",
         sa.Column("channel_id", sa.Uuid(), nullable=False),

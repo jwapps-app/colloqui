@@ -14,7 +14,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("messages", sa.Column("webhook_name", sa.String(length=64), nullable=True))
+    insp = sa.inspect(op.get_bind())
+    if "webhook_name" not in [c["name"] for c in insp.get_columns("messages")]:
+        op.add_column("messages", sa.Column("webhook_name", sa.String(length=64), nullable=True))
+    if "webhooks" in insp.get_table_names():
+        return
     op.create_table(
         "webhooks",
         sa.Column("id", sa.Uuid(), nullable=False),

@@ -14,14 +14,17 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("messages", sa.Column("thread_root_id", sa.Uuid(), nullable=True))
-    op.create_foreign_key(
-        "fk_messages_thread_root", "messages", "messages",
-        ["thread_root_id"], ["id"], ondelete="SET NULL",
-    )
-    op.create_index(
-        "ix_messages_thread_root_id", "messages", ["thread_root_id"]
-    )
+    insp = sa.inspect(op.get_bind())
+    if "thread_root_id" not in [c["name"] for c in insp.get_columns("messages")]:
+        op.add_column("messages", sa.Column("thread_root_id", sa.Uuid(), nullable=True))
+        op.create_foreign_key(
+            "fk_messages_thread_root", "messages", "messages",
+            ["thread_root_id"], ["id"], ondelete="SET NULL",
+        )
+    if "ix_messages_thread_root_id" not in [i["name"] for i in insp.get_indexes("messages")]:
+        op.create_index(
+            "ix_messages_thread_root_id", "messages", ["thread_root_id"]
+        )
 
 
 def downgrade() -> None:

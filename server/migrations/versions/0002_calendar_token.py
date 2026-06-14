@@ -14,10 +14,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("calendar_token", sa.String(64), nullable=True))
-    op.create_index(
-        "ix_users_calendar_token", "users", ["calendar_token"], unique=True
-    )
+    # Idempotent: on a fresh DB, 0001's create_all() already built the full
+    # current schema, so only add what's missing.
+    insp = sa.inspect(op.get_bind())
+    if "calendar_token" not in [c["name"] for c in insp.get_columns("users")]:
+        op.add_column("users", sa.Column("calendar_token", sa.String(64), nullable=True))
+    if "ix_users_calendar_token" not in [i["name"] for i in insp.get_indexes("users")]:
+        op.create_index(
+            "ix_users_calendar_token", "users", ["calendar_token"], unique=True
+        )
 
 
 def downgrade() -> None:

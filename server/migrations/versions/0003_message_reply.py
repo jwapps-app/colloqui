@@ -14,11 +14,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("messages", sa.Column("reply_to_id", sa.Uuid(), nullable=True))
-    op.create_foreign_key(
-        "fk_messages_reply_to", "messages", "messages",
-        ["reply_to_id"], ["id"], ondelete="SET NULL",
-    )
+    insp = sa.inspect(op.get_bind())
+    if "reply_to_id" not in [c["name"] for c in insp.get_columns("messages")]:
+        op.add_column("messages", sa.Column("reply_to_id", sa.Uuid(), nullable=True))
+        op.create_foreign_key(
+            "fk_messages_reply_to", "messages", "messages",
+            ["reply_to_id"], ["id"], ondelete="SET NULL",
+        )
 
 
 def downgrade() -> None:

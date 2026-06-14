@@ -14,6 +14,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "link_previews" in sa.inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "link_previews",
         sa.Column("url_hash", sa.String(length=64), nullable=False),

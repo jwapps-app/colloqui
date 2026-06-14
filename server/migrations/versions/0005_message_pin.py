@@ -14,12 +14,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("messages", sa.Column("pinned_at", sa.DateTime(timezone=True), nullable=True))
-    op.add_column("messages", sa.Column("pinned_by", sa.Uuid(), nullable=True))
-    op.create_foreign_key(
-        "fk_messages_pinned_by", "messages", "users",
-        ["pinned_by"], ["id"], ondelete="SET NULL",
-    )
+    insp = sa.inspect(op.get_bind())
+    if "pinned_at" not in [c["name"] for c in insp.get_columns("messages")]:
+        op.add_column("messages", sa.Column("pinned_at", sa.DateTime(timezone=True), nullable=True))
+        op.add_column("messages", sa.Column("pinned_by", sa.Uuid(), nullable=True))
+        op.create_foreign_key(
+            "fk_messages_pinned_by", "messages", "users",
+            ["pinned_by"], ["id"], ondelete="SET NULL",
+        )
 
 
 def downgrade() -> None:

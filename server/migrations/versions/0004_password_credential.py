@@ -14,6 +14,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "password_credentials" in sa.inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "password_credentials",
         sa.Column("user_id", sa.Uuid(), nullable=False),
