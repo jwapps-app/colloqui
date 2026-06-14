@@ -1,5 +1,7 @@
+import uuid
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -35,3 +37,23 @@ async def mark_all_read(
         .values(read_at=utcnow())
     )
     return {"ok": True}
+
+
+@router.delete("", status_code=204)
+async def clear_notifications(
+    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> None:
+    """Clear (delete) all of the caller's notifications."""
+    await db.execute(delete(Notification).where(Notification.user_id == user.id))
+
+
+@router.delete("/{notification_id}", status_code=204)
+async def dismiss_notification(
+    notification_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    """Dismiss (delete) a single notification."""
+    n = await db.get(Notification, notification_id)
+    if n is not None and n.user_id == user.id:
+        await db.delete(n)

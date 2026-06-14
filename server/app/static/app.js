@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '77';
+const APP_VERSION = '78';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2081,6 +2081,7 @@ async function loadNotifications() {
   const list = $('notif-list');
   const notifications = await api('/notifications');
   list.innerHTML = '';
+  $('notif-clear').classList.toggle('hidden', notifications.length === 0);
   if (notifications.length === 0) {
     const li = document.createElement('li');
     li.className = 'sub';
@@ -2113,8 +2114,33 @@ async function loadNotifications() {
         if (n.data.root_id) openThread({ id: n.data.root_id });
       };
     }
+    const dismiss = document.createElement('button');
+    dismiss.className = 'notif-dismiss';
+    dismiss.textContent = '✕';
+    dismiss.title = 'Clear this notification';
+    dismiss.onclick = async (e) => {
+      e.stopPropagation();
+      dismiss.disabled = true;
+      try {
+        await api(`/notifications/${n.id}`, { method: 'DELETE' });
+        if (!n.read_at && notifUnread > 0) { notifUnread--; updateNotifBadge(); }
+        li.remove();
+        if (!list.querySelector('li:not(.sub)')) loadNotifications();
+      } catch (err) { dismiss.disabled = false; appAlert(err.message); }
+    };
+    li.appendChild(dismiss);
     list.appendChild(li);
   }
+}
+
+async function clearNotifications() {
+  if (!await appConfirm('Clear all notifications?')) return;
+  try {
+    await api('/notifications', { method: 'DELETE' });
+    notifUnread = 0;
+    updateNotifBadge();
+    loadNotifications();
+  } catch (e) { appAlert(e.message); }
 }
 
 async function openNotifs() {
@@ -3181,6 +3207,7 @@ $('settings-close').onclick = () => $('settings').classList.add('hidden');
 $('settings').onclick = e => { if (e.target === $('settings')) $('settings').classList.add('hidden'); };
 $('notifs-btn').onclick = openNotifs;
 $('notifs-close').onclick = () => $('notifs').classList.add('hidden');
+$('notif-clear').onclick = clearNotifications;
 $('notifs').onclick = e => { if (e.target === $('notifs')) $('notifs').classList.add('hidden'); };
 $('tasks-btn').onclick = openTasks;
 $('tasks-close').onclick = () => $('tasks').classList.add('hidden');

@@ -551,6 +551,18 @@ input[type="datetime-local"] { color-scheme: dark; }
 }
 .panel li .sub { color: var(--muted); font-size: 12px; }
 .panel li .grow { flex: 1; min-width: 0; }
+/* clear notifications: per-item ✕ and the header "Clear all" */
+.notif-dismiss {
+  flex-shrink: 0; padding: 2px 8px; font-size: 13px; line-height: 1;
+  color: var(--muted); background: transparent; border: none; cursor: pointer;
+}
+.notif-dismiss:hover { color: var(--danger); }
+#notif-clear {
+  float: right; text-transform: none; letter-spacing: 0; font-size: 11px;
+  padding: 1px 8px; color: var(--muted); background: transparent;
+  border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+}
+#notif-clear:hover { color: var(--text); border-color: var(--accent); }
 .tag {
   font-size: 11px; color: var(--accent); border: 1px solid var(--accent);
   padding: 0 6px; border-radius: 8px; margin-left: 6px;

@@ -729,3 +729,32 @@ async def test_recent_count(client, make_user):
         await db.commit()
     v = await view()
     assert v["message_count"] == 3 and v["recent_count"] == 2
+
+
+async def test_clear_notifications(client, make_user):
+    from app.db import SessionLocal
+    from app.models import Notification
+
+    a_tok, a_id = await make_user("alice")
+    b_tok, _ = await make_user("bob")
+    async with SessionLocal() as db:
+        db.add(Notification(user_id=a_id, type="mention", title="t1", body="b1"))
+        db.add(Notification(user_id=a_id, type="mention", title="t2", body="b2"))
+        await db.commit()
+
+    ns = (await client.get("/api/v1/notifications", headers=auth(a_tok))).json()
+    assert len(ns) == 2
+
+    # Dismiss one.
+    nid = ns[0]["id"]
+    assert (await client.delete(f"/api/v1/notifications/{nid}", headers=auth(a_tok))).status_code == 204
+    ns = (await client.get("/api/v1/notifications", headers=auth(a_tok))).json()
+    assert len(ns) == 1 and ns[0]["id"] != nid
+
+    # Another user can't dismiss alice's (no-op).
+    await client.delete(f"/api/v1/notifications/{ns[0]['id']}", headers=auth(b_tok))
+    assert len((await client.get("/api/v1/notifications", headers=auth(a_tok))).json()) == 1
+
+    # Clear all.
+    assert (await client.delete("/api/v1/notifications", headers=auth(a_tok))).status_code == 204
+    assert (await client.get("/api/v1/notifications", headers=auth(a_tok))).json() == []
