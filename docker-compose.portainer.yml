@@ -1,0 +1,78 @@
+# Portainer stack — self-contained (no files needed on the NAS host).
+#
+# Deploy in Portainer:
+#   Stacks → Add stack → name "colloqui" → Web editor → paste this file
+#   → under "Environment variables" add  POSTGRES_PASSWORD = <strong value>
+#   → Deploy.
+#
+# Everything else has a working default for a Synology install at
+# /volume1/docker/colloqui. Override any of them in the same env section:
+#   COLLOQUI_IMAGE, DATA_DIR, API_PORT, RP_ID, ORIGIN, DEV_MODE
+services:
+
+  api:
+    image: ${COLLOQUI_IMAGE:-ghcr.io/jwapps-app/colloqui:v1.0.0}
+    container_name: colloqui_api
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://app:${POSTGRES_PASSWORD}@db:5432/app
+      - RP_ID=${RP_ID:-jjrrr.co}
+      - ORIGIN=${ORIGIN:-https://colloqui.jjrrr.co}
+      - DEV_MODE=${DEV_MODE:-false}
+    ports:
+      - "${API_PORT:-3300}:8000"
+    volumes:
+      - ${DATA_DIR:-/volume1/docker/colloqui/data}/uploads:/srv/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [colloqui_net]
+
+  db:
+    image: postgres:17-alpine
+    container_name: colloqui_db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=app
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=app
+    volumes:
+      - ${DATA_DIR:-/volume1/docker/colloqui/data}/postgres:/var/lib/postgresql/data
+    networks: [colloqui_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backup:
+    image: postgres:17-alpine
+    container_name: colloqui_backup
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ${DATA_DIR:-/volume1/docker/colloqui/data}:/data:ro
+      - ${DATA_DIR:-/volume1/docker/colloqui/data}/backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [colloqui_net]
+    # Daily: Postgres dump + uploads tarball, keeping the newest 14 of each.
+    entrypoint:
+      - sh
+      - -c
+      - >
+        while true; do
+        STAMP=$$(date +%Y%m%d-%H%M%S);
+        PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h db -U app -d app -Fc -f /backups/db-$$STAMP.dump
+        && { [ -d /data/uploads ] && tar czf /backups/uploads-$$STAMP.tar.gz -C /data uploads || true; }
+        && ls -1t /backups/db-*.dump | tail -n +15 | xargs -r rm -f
+        && ls -1t /backups/uploads-*.tar.gz | tail -n +15 | xargs -r rm -f
+        && echo "[backup] $$STAMP complete" || echo "[backup] FAILED";
+        sleep 86400;
+        done
+
+networks:
+  colloqui_net:
+    name: colloqui_net
