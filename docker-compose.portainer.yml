@@ -11,7 +11,7 @@
 services:
 
   api:
-    image: ${COLLOQUI_IMAGE:-ghcr.io/jwapps-app/colloqui:v1.0.0}
+    image: ${COLLOQUI_IMAGE:-ghcr.io/jwapps-app/colloqui:latest}
     container_name: colloqui_api
     restart: unless-stopped
     environment:
@@ -26,6 +26,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks: [colloqui_net]
 
   db:
     image: postgres:17-alpine
@@ -42,6 +43,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks: [colloqui_net]
 
   backup:
     image: postgres:17-alpine
@@ -55,6 +57,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks: [colloqui_net]
     # Daily: Postgres dump + uploads tarball, keeping the newest 14 of each.
     entrypoint:
       - sh
@@ -69,3 +72,10 @@ services:
         && echo "[backup] $$STAMP complete" || echo "[backup] FAILED";
         sleep 86400;
         done
+
+# An explicit user-defined bridge network — this is what gives the containers
+# DNS so `api` can reach `db` by name. (Synology's legacy default bridge does
+# not, which is why a network must be declared.)
+networks:
+  colloqui_net:
+    driver: bridge
