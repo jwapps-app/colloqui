@@ -15,7 +15,7 @@ services:
     container_name: colloqui_api
     restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql+asyncpg://app:${POSTGRES_PASSWORD}@db:5432/app
+      - DATABASE_URL=postgresql+asyncpg://app:${POSTGRES_PASSWORD}@10.213.0.10:5432/app
       - RP_ID=${RP_ID:-jjrrr.co}
       - ORIGIN=${ORIGIN:-https://colloqui.jjrrr.co}
       - DEV_MODE=${DEV_MODE:-false}
@@ -43,7 +43,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-    networks: [colloqui_net]
+    networks:
+      colloqui_net:
+        ipv4_address: 10.213.0.10
 
   backup:
     image: postgres:17-alpine
@@ -65,7 +67,7 @@ services:
       - >
         while true; do
         STAMP=$$(date +%Y%m%d-%H%M%S);
-        PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h db -U app -d app -Fc -f /backups/db-$$STAMP.dump
+        PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h 10.213.0.10 -U app -d app -Fc -f /backups/db-$$STAMP.dump
         && { [ -d /data/uploads ] && tar czf /backups/uploads-$$STAMP.tar.gz -C /data uploads || true; }
         && ls -1t /backups/db-*.dump | tail -n +15 | xargs -r rm -f
         && ls -1t /backups/uploads-*.tar.gz | tail -n +15 | xargs -r rm -f
@@ -79,3 +81,6 @@ services:
 networks:
   colloqui_net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.213.0.0/24
