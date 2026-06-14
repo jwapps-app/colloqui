@@ -690,3 +690,42 @@ async def test_idempotent_send(client, make_user):
     assert again["id"] == cid
     msgs = (await client.get(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok))).json()
     assert sum(1 for m in msgs if m["id"] == cid) == 1
+
+
+async def test_recent_count(client, make_user):
+    import uuid as _uuid
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from app.db import SessionLocal
+    from app.models import Message, utcnow
+
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("alice")
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin_tok), json={"name": "RC"})).json()
+    await client.post(f"/api/v1/spaces/{sp['id']}/members", headers=auth(admin_tok),
+                      json={"user_id": str(a_id)})
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "c", "space_id": sp["id"]})).json()
+
+    async def view():
+        chans = (await client.get("/api/v1/channels", headers=auth(a_tok))).json()
+        return next(c for c in chans if c["id"] == ch["id"])
+
+    # Two fresh messages: both count toward total and the 7-day window.
+    for t in ("one", "two"):
+        await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+                          json={"content": t})
+    v = await view()
+    assert v["message_count"] == 2 and v["recent_count"] == 2
+
+    # Backdate one message past 7 days: total unchanged, recent drops to 1.
+    old = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+           json={"content": "ancient"})).json()
+    async with SessionLocal() as db:
+        await db.execute(update(Message).where(Message.id == _uuid.UUID(old["id"]))
+                         .values(created_at=utcnow() - timedelta(days=10)))
+        await db.commit()
+    v = await view()
+    assert v["message_count"] == 3 and v["recent_count"] == 2

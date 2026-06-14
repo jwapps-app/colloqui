@@ -102,7 +102,8 @@ class ChannelOut(BaseModel):
     dm_user: UserOut | None = None  # the other person in a 1:1 DM
     dm_members: list[UserOut] = []  # the other people in a group DM (3+)
     my_role: str | None = None  # member | owner | None (admin viewing)
-    message_count: int = 0
+    message_count: int = 0  # all-time total
+    recent_count: int = 0   # messages in the last 7 days (current activity)
     unread_count: int = 0
     open_task_count: int = 0
     reminder_count: int = 0

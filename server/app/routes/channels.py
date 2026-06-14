@@ -105,6 +105,16 @@ async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOu
         .select_from(Message)
         .where(Message.channel_id == channel.id, Message.deleted_at.is_(None))
     )
+    # Trailing 7-day message count — a feel for the channel's *current* activity.
+    recent = await db.scalar(
+        select(func.count())
+        .select_from(Message)
+        .where(
+            Message.channel_id == channel.id,
+            Message.deleted_at.is_(None),
+            Message.created_at >= utcnow() - timedelta(days=7),
+        )
+    )
     read = await db.get(ChannelRead, (channel.id, me.id))
     unread_conds = [
         Message.channel_id == channel.id,
@@ -170,6 +180,7 @@ async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOu
         dm_members=dm_members,
         my_role=my_member.role if my_member else None,
         message_count=total or 0,
+        recent_count=recent or 0,
         unread_count=unread or 0,
         open_task_count=open_tasks,
         reminder_count=reminders or 0,

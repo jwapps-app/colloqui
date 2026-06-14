@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '76';
+const APP_VERSION = '77';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -572,12 +572,12 @@ function channelLi(ch) {
     tasks.title = `${ch.open_task_count} open task(s)`;
     li.appendChild(tasks);
   }
-  if (ch.message_count) {
-    const total = document.createElement('span');
-    total.className = 'msg-count';
-    total.textContent = ch.message_count;
-    total.title = `${ch.message_count} message(s)`;
-    li.appendChild(total);
+  if (ch.recent_count) {
+    const recent = document.createElement('span');
+    recent.className = 'msg-count';
+    recent.textContent = ch.recent_count;
+    recent.title = `${ch.recent_count} message(s) in the last 7 days`;
+    li.appendChild(recent);
   }
   if (muted) {
     const bell = document.createElement('span');
@@ -2446,6 +2446,7 @@ function handleEvent(data) {
       }
       if (ch) {
         ch.message_count = (ch.message_count || 0) + 1;
+        ch.recent_count = (ch.recent_count || 0) + 1;
         const current = currentChannel && m.channel_id === currentChannel.id;
         if (!current && (!me || m.sender.id !== me.id)) {
           ch.unread_count = (ch.unread_count || 0) + 1;
@@ -2462,11 +2463,15 @@ function handleEvent(data) {
       renderMessage(m);
       const box = $('messages');
       box.scrollTop = box.scrollHeight;
-      if (ch) ch.message_count = (ch.message_count || 0) + 1;
+      if (ch) {
+        ch.message_count = (ch.message_count || 0) + 1;
+        ch.recent_count = (ch.recent_count || 0) + 1;
+      }
       markRead(currentChannel.id);  // keep the read marker current
       renderChannels();
     } else if (ch) {
       ch.message_count = (ch.message_count || 0) + 1;
+      ch.recent_count = (ch.recent_count || 0) + 1;
       if (!me || m.sender.id !== me.id) ch.unread_count = (ch.unread_count || 0) + 1;
       renderChannels();
     } else {
@@ -2500,7 +2505,11 @@ function handleEvent(data) {
       if (n >= 0) c.textContent = `${n} ${n === 1 ? 'reply' : 'replies'}`;
     }
     const ch = channelById(data.message.channel_id);
-    if (ch && ch.message_count) { ch.message_count--; renderChannels(); }
+    if (ch && ch.message_count) {
+      ch.message_count--;
+      if (ch.recent_count) ch.recent_count--;
+      renderChannels();
+    }
     scheduleTaskCount();
   } else if (data.type === 'message.reacted') {
     document.querySelectorAll(`.msg[data-id="${data.message_id}"] .reactions`)
