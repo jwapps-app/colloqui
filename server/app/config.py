@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     dev_mode: bool = False
     upload_dir: str = "/srv/uploads"
     max_file_size_mb: int = 25
+    # Release version, stamped into the image at build time (the git tag, e.g.
+    # "v1.0.12"). "dev" for local/source builds. Surfaced in the UI footer.
+    app_version: str = "dev"
 
     # APNs (native iOS push). All optional — push is a silent no-op until these
     # are set, so the server runs fine without them. The server talks to Apple

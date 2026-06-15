@@ -42,6 +42,8 @@ jobs:
         with:
           context: ./server
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

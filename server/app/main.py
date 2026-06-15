@@ -120,7 +120,7 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True}
+    return {"ok": True, "version": settings.app_version}
 
 
 for router in (

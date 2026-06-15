@@ -5,15 +5,19 @@
   --text: #e7e6ee; --muted: #918da0;
   --accent: #6b63e5; --accent-rgb: 107, 99, 229; --danger: #e0604f;
   color-scheme: dark;  /* native date/select/scrollbar controls render dark */
+  --probe-sab: env(safe-area-inset-bottom, 0px);  /* readable by the ?debug overlay */
 }
 html { height: 100%; }
 body {
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: var(--bg); color: var(--text);
-  /* --vh is set from window.innerHeight in JS (iOS standalone mis-measures
-     CSS viewport units); 100dvh is the fallback before JS runs. */
-  height: 100dvh;
-  height: var(--vh, 100dvh);
+  /* Pin to the physical screen. In an installed iOS PWA `position: fixed;
+     inset: 0` covers the *entire* screen including the bottom safe area with
+     no dependence on innerHeight/visualViewport/100vh (all of which mis-report
+     the bottom inset in standalone and left a gap). The keyboard is handled by
+     shrinking #app via --kb, set from visualViewport in JS. */
+  position: fixed;
+  inset: 0;
   overflow: hidden;
 }
 #back-btn { display: none; }
@@ -104,7 +108,10 @@ button {
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button:hover { filter: brightness(1.1); }
 
-#app { display: flex; height: 100dvh; height: var(--vh, 100dvh); }
+/* Fills the pinned body; shrinks by the on-screen keyboard height (--kb, set
+   from visualViewport) so the composer rides above the keyboard and snaps back
+   to the bottom when it closes. --kb is 0 whenever no keyboard is open. */
+#app { display: flex; height: 100%; height: calc(100% - var(--kb, 0px)); }
 #app > aside {
   width: 280px; height: 100%; background: var(--panel);
   border-right: 1px solid var(--line);

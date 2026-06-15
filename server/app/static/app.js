@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '82';
+const APP_VERSION = '83';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -27,46 +27,66 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) checkForUpdate();
 });
 
-// Pin the layout to the real usable height. iOS standalone mis-measures CSS
-// viewport units (100vh/100dvh), so we drive it from JS.
-//
-// The full-screen base is window.innerHeight: in an installed PWA it covers the
-// entire screen *including* the bottom safe area, so #app reaches the bottom
-// edge and the composer's env(safe-area-inset-bottom) padding lands correctly —
-// no gap. (visualViewport.height excludes the bottom safe area even with no
-// keyboard, which is what was leaving a ~34px gap at the bottom.)
-//
-// We use visualViewport ONLY to detect the keyboard: when it's open the visual
-// viewport shrinks well below the layout viewport, so we subtract that overlap
-// and the composer rises above the keyboard. A threshold ignores small
-// safe-area/toolbar deltas so an idle screen always fills completely, and the
-// height restores the instant the keyboard closes. Standalone settles late
-// after launch, so we also re-measure aggressively for the first ~2s.
-function setViewportHeight() {
-  const full = window.innerHeight;
-  if (!full) return;
+// Show the real release version (the git tag baked into the image) in the
+// footer, instead of the internal cache-bust counter. Falls back silently.
+fetch('/healthz').then(r => r.json()).then(d => {
+  const el = document.getElementById('ver');
+  if (el && d && d.version) el.textContent = d.version === 'dev' ? 'dev' : d.version;
+}).catch(() => {});
+
+// The screen is filled by CSS (`body { position: fixed; inset: 0 }`), which is
+// the only reliable full-screen primitive in an installed iOS PWA. JS just
+// measures the on-screen keyboard and exposes it as --kb so #app can shrink to
+// sit above it: kb = how much visualViewport shrank below the layout viewport.
+// A threshold ignores small safe-area/toolbar deltas, so --kb is 0 (full
+// screen, no gap) whenever no real keyboard is open, and restores instantly on
+// close.
+const _dbg = location.search.includes('debug');
+function setKeyboardInset() {
   const vv = window.visualViewport;
-  // Keyboard overlap = how much the visible area is shrunk from the full screen.
-  let kb = vv ? Math.max(0, full - vv.height - vv.offsetTop) : 0;
-  if (kb < 120) kb = 0;  // ignore safe-area/toolbar jitter; only a real keyboard
-  document.documentElement.style.setProperty('--vh', Math.round(full - kb) + 'px');
+  let kb = 0;
+  if (vv) {
+    kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    if (kb < 120) kb = 0;  // not a keyboard, just safe-area/toolbar jitter
+  }
+  document.documentElement.style.setProperty('--kb', kb + 'px');
+  if (_dbg) showDebug(kb);
 }
-setViewportHeight();
-let _vhTicks = 0;
-const _vhWarmup = setInterval(() => {
-  setViewportHeight();
-  if (++_vhTicks > 14) clearInterval(_vhWarmup);  // ~2.1s of re-measuring
-}, 150);
+setKeyboardInset();
 ['resize', 'orientationchange', 'pageshow', 'focus'].forEach(
-  e => window.addEventListener(e, setViewportHeight)
+  e => window.addEventListener(e, setKeyboardInset)
 );
 if (window.visualViewport) {
-  // The reliable signal for keyboard open/close and toolbar changes on iOS.
-  window.visualViewport.addEventListener('resize', setViewportHeight);
+  // The reliable signal for keyboard open/close on iOS.
+  window.visualViewport.addEventListener('resize', setKeyboardInset);
+  window.visualViewport.addEventListener('scroll', setKeyboardInset);
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) setViewportHeight();
+  if (!document.hidden) setKeyboardInset();
 });
+
+// Append ?debug to the URL to overlay live viewport measurements — read these
+// off to me if a layout gap persists so we can pinpoint it instead of guessing.
+function showDebug(kb) {
+  let el = document.getElementById('vp-debug');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'vp-debug';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+      'background:rgba(0,0,0,.8);color:#0f0;font:11px/1.4 monospace;' +
+      'padding:4px 8px;white-space:pre-wrap;pointer-events:none';
+    document.body.appendChild(el);
+  }
+  const vv = window.visualViewport;
+  const sab = getComputedStyle(document.documentElement)
+    .getPropertyValue('--probe-sab') || '?';
+  el.textContent =
+    `screen ${screen.width}x${screen.height} dpr ${devicePixelRatio}\n` +
+    `innerH ${window.innerHeight}  vv.h ${vv ? Math.round(vv.height) : '-'}` +
+    `  vv.offTop ${vv ? Math.round(vv.offsetTop) : '-'}\n` +
+    `--kb ${kb}  safe-bottom ${sab.trim()}  ` +
+    `app.h ${document.getElementById('app')?.offsetHeight || '-'}`;
+}
 
 // ---------- helpers ----------
 

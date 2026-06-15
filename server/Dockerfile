@@ -9,6 +9,10 @@ COPY alembic.ini .
 COPY migrations ./migrations
 COPY app ./app
 
+# Release version (the git tag), passed by CI and surfaced in the UI footer.
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 RUN useradd --no-create-home svc
 USER svc
 

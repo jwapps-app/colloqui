@@ -15,7 +15,9 @@ async def _default_space_id(client, token):
 
 async def test_health(client):
     r = await client.get("/healthz")
-    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and "version" in body
 
 
 async def test_unauthenticated_blocked(client):
