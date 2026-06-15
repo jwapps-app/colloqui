@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '87';
+const APP_VERSION = '88';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -61,22 +61,39 @@ function setViewportHeight() {
   document.documentElement.style.setProperty('--vh', Math.round(h) + 'px');
   if (_dbg) showDebug(kb, h);
 }
-setViewportHeight();
+// When an input is focused, iOS scrolls the layout viewport to reveal it — but
+// the body is position:fixed, so that scroll just drags the whole UI (and the
+// keyboard) up into a broken, stuck state. We already shrink #app to sit above
+// the keyboard, so the scroll is unwanted: undo it on every viewport change.
+function pinViewport() {
+  setViewportHeight();
+  if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
+  const se = document.scrollingElement;
+  if (se && se.scrollTop) se.scrollTop = 0;
+}
+pinViewport();
 let _vhTicks = 0;
 const _vhWarmup = setInterval(() => {
-  setViewportHeight();
+  pinViewport();
   if (++_vhTicks > 14) clearInterval(_vhWarmup);  // standalone settles late (~2s)
 }, 150);
 ['resize', 'orientationchange', 'pageshow', 'focus'].forEach(
-  e => window.addEventListener(e, setViewportHeight)
+  e => window.addEventListener(e, pinViewport)
 );
 if (window.visualViewport) {
   // The reliable signal for keyboard open/close on iOS.
-  window.visualViewport.addEventListener('resize', setViewportHeight);
-  window.visualViewport.addEventListener('scroll', setViewportHeight);
+  window.visualViewport.addEventListener('resize', pinViewport);
+  window.visualViewport.addEventListener('scroll', pinViewport);
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) setViewportHeight();
+  if (!document.hidden) pinViewport();
+});
+// iOS does its scroll-into-view shortly after focus and again as the keyboard
+// animates in, so snap back across that window too.
+document.addEventListener('focusin', () => {
+  pinViewport();
+  setTimeout(pinViewport, 50);
+  setTimeout(pinViewport, 300);
 });
 
 // Diagnostic overlay of live viewport metrics. Toggle it by tapping the version
