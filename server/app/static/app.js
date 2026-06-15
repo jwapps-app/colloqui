@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '81';
+const APP_VERSION = '82';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -28,15 +28,28 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Pin the layout to the real usable height. iOS standalone mis-measures CSS
-// viewport units (100vh/100dvh), so we drive it from JS. We prefer
-// visualViewport.height: it reports the actually-visible area and fires a clean
-// `resize` on keyboard show AND hide, so the bottom composer tracks the keyboard
-// and snaps back instead of "creeping up" (window.innerHeight doesn't reliably
-// restore after the keyboard closes on iOS). Standalone settles late after
-// launch, so we also re-measure aggressively for the first ~2s.
+// viewport units (100vh/100dvh), so we drive it from JS.
+//
+// The full-screen base is window.innerHeight: in an installed PWA it covers the
+// entire screen *including* the bottom safe area, so #app reaches the bottom
+// edge and the composer's env(safe-area-inset-bottom) padding lands correctly —
+// no gap. (visualViewport.height excludes the bottom safe area even with no
+// keyboard, which is what was leaving a ~34px gap at the bottom.)
+//
+// We use visualViewport ONLY to detect the keyboard: when it's open the visual
+// viewport shrinks well below the layout viewport, so we subtract that overlap
+// and the composer rises above the keyboard. A threshold ignores small
+// safe-area/toolbar deltas so an idle screen always fills completely, and the
+// height restores the instant the keyboard closes. Standalone settles late
+// after launch, so we also re-measure aggressively for the first ~2s.
 function setViewportHeight() {
-  const h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
-  if (h) document.documentElement.style.setProperty('--vh', Math.round(h) + 'px');
+  const full = window.innerHeight;
+  if (!full) return;
+  const vv = window.visualViewport;
+  // Keyboard overlap = how much the visible area is shrunk from the full screen.
+  let kb = vv ? Math.max(0, full - vv.height - vv.offsetTop) : 0;
+  if (kb < 120) kb = 0;  // ignore safe-area/toolbar jitter; only a real keyboard
+  document.documentElement.style.setProperty('--vh', Math.round(full - kb) + 'px');
 }
 setViewportHeight();
 let _vhTicks = 0;
