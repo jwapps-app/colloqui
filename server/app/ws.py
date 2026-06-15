@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from collections.abc import Iterable
 from typing import Any
@@ -86,6 +87,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         await manager.broadcast(
             {"type": "presence", "user_id": str(user.id), "online": True}
         )
+    last_typing = 0.0
     try:
         while True:
             data = await ws.receive_json()
@@ -94,6 +96,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             if data.get("type") == "ping":
                 await ws.send_json({"type": "pong"})
             elif data.get("type") == "typing":
+                now = time.monotonic()
+                if now - last_typing < 1.0:  # throttle typing fan-out
+                    continue
+                last_typing = now
                 try:
                     channel_id = uuid.UUID(str(data.get("channel_id")))
                 except (ValueError, TypeError):

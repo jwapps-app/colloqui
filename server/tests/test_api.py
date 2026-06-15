@@ -787,3 +787,30 @@ async def test_counts_exclude_thread_replies(client, make_user):
     # not "1 but empty" (the reported bug).
     await client.delete(f"/api/v1/messages/{root['id']}", headers=auth(a_tok))
     assert await counts() == (0, 0)
+
+
+async def test_security_headers_and_login_enumeration(client, make_user):
+    # Hardening headers present on responses.
+    h = (await client.get("/healthz")).headers
+    assert h.get("x-content-type-options") == "nosniff"
+    assert h.get("x-frame-options") == "DENY"
+    assert "default-src 'self'" in h.get("content-security-policy", "")
+    assert "max-age=" in h.get("strict-transport-security", "")
+    assert "camera=()" in h.get("permissions-policy", "")
+    assert h.get("cross-origin-opener-policy") == "same-origin"
+
+    # A missing username and a wrong password return the SAME generic 401 — no
+    # enumeration via status, message (or, thanks to the dummy verify, timing).
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    await client.post("/api/v1/admin/users", headers=auth(admin_tok),
+                      json={"username": "zoe", "display_name": "Zoe", "password": "correcthorse1"})
+    r_missing = await client.post("/api/v1/auth/login/password",
+                                  json={"username": "nobodyxyz", "password": "whatever123"})
+    r_wrongpw = await client.post("/api/v1/auth/login/password",
+                                  json={"username": "zoe", "password": "wrongpass123"})
+    assert r_missing.status_code == 401 and r_wrongpw.status_code == 401
+    assert r_missing.json()["detail"] == r_wrongpw.json()["detail"]
+    # The correct password still authenticates.
+    ok = await client.post("/api/v1/auth/login/password",
+                           json={"username": "zoe", "password": "correcthorse1"})
+    assert ok.status_code == 200 and ok.json()["token"]

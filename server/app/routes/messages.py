@@ -706,6 +706,7 @@ async def list_thread(
                 (Message.id == root.id) | (Message.thread_root_id == root.id),
             )
             .order_by(Message.created_at, Message.id)
+            .limit(2000)  # bound the response; threads never realistically hit this
         )
     ).all()
     msgs = [m for m, _, _ in rows]

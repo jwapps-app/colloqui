@@ -55,6 +55,11 @@ router = APIRouter(
     prefix="/api/v1/auth", tags=["auth"], dependencies=[Depends(rate_limit_auth)]
 )
 
+# Pre-computed once at import. A failed password login always verifies against a
+# real Argon2 hash (this one when the username/credential doesn't exist) so the
+# response time can't reveal whether a username exists (enumeration via timing).
+_DUMMY_PASSWORD_HASH = hash_password("colloqui-login-timing-equalizer")
+
 # Short-lived WebAuthn challenges, keyed by an opaque token returned to the
 # client between the options and verify steps. Single-process only.
 pending_registrations = ExpiringStore(ttl_seconds=settings.challenge_ttl_seconds)
@@ -347,13 +352,11 @@ async def login_password(
     body: LoginPasswordIn, request: Request, db: AsyncSession = Depends(get_db)
 ) -> TokenOut:
     user = await db.scalar(select(User).where(User.username == body.username.lower()))
-    cred = await db.get(PasswordCredential, user.id) if user else None
-    if (
-        user is None
-        or user.disabled
-        or cred is None
-        or not verify_password(cred.password_hash, body.password)
-    ):
+    cred = await db.get(PasswordCredential, user.id) if (user and not user.disabled) else None
+    # Always run exactly one verification (dummy hash when there's no credential)
+    # so timing doesn't leak whether the username exists.
+    ok = verify_password(cred.password_hash if cred else _DUMMY_PASSWORD_HASH, body.password)
+    if not (cred and ok):
         raise HTTPException(401, "Incorrect username or password")
     token = await _issue_session(db, user, request)
     await db.commit()

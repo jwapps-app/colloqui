@@ -98,6 +98,17 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("Content-Security-Policy", CSP)
+    # Force HTTPS for a year (ignored over plain http, so safe for LAN/dev).
+    response.headers.setdefault(
+        "Strict-Transport-Security", "max-age=31536000"
+    )
+    # Disable powerful features the app never uses.
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    )
+    # Isolate our browsing context from any opener/popups.
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
     if request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
     else:

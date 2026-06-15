@@ -12,11 +12,19 @@ from .security import RateLimiter, hash_token
 auth_limiter = RateLimiter(limit=30, window_seconds=60)
 
 
+def client_ip(request: Request) -> str:
+    # Behind a Cloudflare Tunnel the socket peer is always the tunnel, so the
+    # real client IP comes from CF-Connecting-IP (Cloudflare sets it and strips
+    # any client-supplied copy; the origin isn't reachable except via the
+    # tunnel). Falls back to the socket peer for direct/LAN/dev access.
+    cf = request.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 def rate_limit_auth(request: Request) -> None:
-    # Behind Cloudflare Tunnel every request has the tunnel's IP; switch this
-    # to the CF-Connecting-IP header at production deploy time.
-    ip = request.client.host if request.client else "unknown"
-    if not auth_limiter.allow(ip):
+    if not auth_limiter.allow(client_ip(request)):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts")
 
 
