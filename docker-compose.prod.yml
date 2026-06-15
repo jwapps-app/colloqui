@@ -16,10 +16,20 @@ services:
       - RP_ID=${RP_ID}
       - ORIGIN=${ORIGIN}
       - DEV_MODE=${DEV_MODE:-false}
+      # iOS push (APNs). Empty values = push stays off (safe no-op). Fill these
+      # in .env to enable; see the APNs section in .env.example.
+      - APNS_KEY_PATH=/run/secrets/apns.p8
+      - APNS_KEY_ID=${APNS_KEY_ID:-}
+      - APNS_TEAM_ID=${APNS_TEAM_ID:-}
+      - APNS_TOPIC=${APNS_TOPIC:-}
+      - APNS_SANDBOX=${APNS_SANDBOX:-false}
     ports:
       - "${API_PORT:-3300}:8000"
     volumes:
       - ${DATA_DIR:-./data}/uploads:/srv/uploads
+      # Mount your downloaded APNs auth key (.p8) read-only to enable push. Put
+      # the file next to this compose file as AuthKey.p8, then uncomment:
+      # - ./AuthKey.p8:/run/secrets/apns.p8:ro
     depends_on:
       db:
         condition: service_healthy
