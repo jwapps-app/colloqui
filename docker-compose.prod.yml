@@ -23,6 +23,11 @@ services:
       - APNS_TEAM_ID=${APNS_TEAM_ID:-}
       - APNS_TOPIC=${APNS_TOPIC:-}
       - APNS_SANDBOX=${APNS_SANDBOX:-false}
+      # Web Push (PWA notifications, incl. iOS). Empty = off (safe no-op). Fill
+      # these in .env to enable; see the Web Push section in the README.
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-}
     ports:
       - "${API_PORT:-3300}:8000"
     volumes:

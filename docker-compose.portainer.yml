@@ -18,6 +18,11 @@ services:
       - RP_ID=${RP_ID:-jjrrr.co}
       - ORIGIN=${ORIGIN:-https://colloqui.jjrrr.co}
       - DEV_MODE=${DEV_MODE:-false}
+      # Web Push (PWA notifications, incl. iOS). Empty = off (safe no-op). Set
+      # these in the stack's env to enable; see the README Web Push section.
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-}
     ports:
       - "${API_PORT:-3300}:8000"
     volumes:
