@@ -28,13 +28,15 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Pin the layout to the real usable height. iOS standalone mis-measures CSS
-// viewport units (100vh/100dvh), so we drive it from window.innerHeight. The
-// catch is that standalone settles its layout *late* after launch, so the very
-// first read can be wrong (the home screen looked "smashed to the top"). We
-// re-measure aggressively for the first ~2s, then rely on events.
+// viewport units (100vh/100dvh), so we drive it from JS. We prefer
+// visualViewport.height: it reports the actually-visible area and fires a clean
+// `resize` on keyboard show AND hide, so the bottom composer tracks the keyboard
+// and snaps back instead of "creeping up" (window.innerHeight doesn't reliably
+// restore after the keyboard closes on iOS). Standalone settles late after
+// launch, so we also re-measure aggressively for the first ~2s.
 function setViewportHeight() {
-  const h = window.innerHeight;
-  if (h) document.documentElement.style.setProperty('--vh', h + 'px');
+  const h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  if (h) document.documentElement.style.setProperty('--vh', Math.round(h) + 'px');
 }
 setViewportHeight();
 let _vhTicks = 0;
@@ -45,6 +47,10 @@ const _vhWarmup = setInterval(() => {
 ['resize', 'orientationchange', 'pageshow', 'focus'].forEach(
   e => window.addEventListener(e, setViewportHeight)
 );
+if (window.visualViewport) {
+  // The reliable signal for keyboard open/close and toolbar changes on iOS.
+  window.visualViewport.addEventListener('resize', setViewportHeight);
+}
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) setViewportHeight();
 });
