@@ -758,3 +758,32 @@ async def test_clear_notifications(client, make_user):
     # Clear all.
     assert (await client.delete("/api/v1/notifications", headers=auth(a_tok))).status_code == 204
     assert (await client.get("/api/v1/notifications", headers=auth(a_tok))).json() == []
+
+
+async def test_counts_exclude_thread_replies(client, make_user):
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("alice")
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin_tok), json={"name": "TC"})).json()
+    await client.post(f"/api/v1/spaces/{sp['id']}/members", headers=auth(admin_tok),
+                      json={"user_id": str(a_id)})
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "paperwork", "space_id": sp["id"]})).json()
+
+    async def counts():
+        chans = (await client.get("/api/v1/channels", headers=auth(a_tok))).json()
+        c = next(x for x in chans if x["id"] == ch["id"])
+        return c["message_count"], c["recent_count"]
+
+    root = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+            json={"content": "root"})).json()
+    assert await counts() == (1, 1)
+
+    # A thread reply must NOT inflate the channel's message count.
+    await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+                      json={"content": "reply", "thread_root_id": root["id"]})
+    assert await counts() == (1, 1)
+
+    # Deleting the root orphans the reply — but the channel now reads as empty (0),
+    # not "1 but empty" (the reported bug).
+    await client.delete(f"/api/v1/messages/{root['id']}", headers=auth(a_tok))
+    assert await counts() == (0, 0)

@@ -1152,7 +1152,13 @@ async def delete_message(
         message.channel_id,
         {
             "type": "message.deleted",
-            "message": {"id": str(message.id), "channel_id": str(message.channel_id)},
+            "message": {
+                "id": str(message.id),
+                "channel_id": str(message.channel_id),
+                "thread_root_id": str(message.thread_root_id)
+                if message.thread_root_id
+                else None,
+            },
         },
     )
     if message.thread_root_id is not None:

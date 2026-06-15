@@ -100,10 +100,17 @@ async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOu
         elif others:
             dm_members = [UserOut.model_validate(o) for o in others]  # group DM
     my_member = await db.get(ChannelMember, (channel.id, me.id))
+    # Counts mirror what the channel timeline shows: top-level (non-thread-reply),
+    # non-deleted messages. (Thread replies live in the thread view; counting
+    # them would show a number on a channel that looks empty.)
     total = await db.scalar(
         select(func.count())
         .select_from(Message)
-        .where(Message.channel_id == channel.id, Message.deleted_at.is_(None))
+        .where(
+            Message.channel_id == channel.id,
+            Message.deleted_at.is_(None),
+            Message.thread_root_id.is_(None),
+        )
     )
     # Trailing 7-day message count — a feel for the channel's *current* activity.
     recent = await db.scalar(
@@ -112,6 +119,7 @@ async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOu
         .where(
             Message.channel_id == channel.id,
             Message.deleted_at.is_(None),
+            Message.thread_root_id.is_(None),
             Message.created_at >= utcnow() - timedelta(days=7),
         )
     )

@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '80';
+const APP_VERSION = '81';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2471,8 +2471,8 @@ function handleEvent(data) {
         if (currentChannel && m.channel_id === currentChannel.id) markRead(currentChannel.id);
       }
       if (ch) {
-        ch.message_count = (ch.message_count || 0) + 1;
-        ch.recent_count = (ch.recent_count || 0) + 1;
+        // Thread replies aren't in the channel timeline, so they don't count
+        // toward the channel's message count — only unread activity.
         const current = currentChannel && m.channel_id === currentChannel.id;
         if (!current && (!me || m.sender.id !== me.id)) {
           ch.unread_count = (ch.unread_count || 0) + 1;
@@ -2531,8 +2531,9 @@ function handleEvent(data) {
       if (n >= 0) c.textContent = `${n} ${n === 1 ? 'reply' : 'replies'}`;
     }
     const ch = channelById(data.message.channel_id);
-    if (ch && ch.message_count) {
-      ch.message_count--;
+    // Only top-level (non-thread-reply) messages count toward the channel total.
+    if (ch && !data.message.thread_root_id) {
+      if (ch.message_count) ch.message_count--;
       if (ch.recent_count) ch.recent_count--;
       renderChannels();
     }
