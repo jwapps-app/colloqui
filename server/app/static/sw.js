@@ -21,20 +21,25 @@ self.addEventListener('push', (event) => {
   let p = {};
   try { p = event.data ? event.data.json() : {}; } catch (e) {}
   const data = p.data || {};
-  const jobs = [
-    self.registration.showNotification(p.title || 'Colloqui', {
+  event.waitUntil((async () => {
+    // Always keep the app-icon badge in sync (server sends the unread total).
+    if (self.navigator && self.navigator.setAppBadge && typeof p.badge === 'number') {
+      try { await self.navigator.setAppBadge(p.badge); } catch (e) {}
+    }
+    // Don't pop a banner if the app is already open and in front — the in-app UI
+    // is already live. This also stops the double-notification on iOS: after you
+    // tap a banner to open the app, iOS re-delivers the same push to the now-
+    // active service worker, which would otherwise show it a second time.
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (wins.some(w => w.focused || w.visibilityState === 'visible')) return;
+    await self.registration.showNotification(p.title || 'Colloqui', {
       body: p.body || '',
       icon: '/icon-192.png',
       badge: '/icon-192.png',
       data,
       tag: data.channel_id || undefined,  // coalesce per-channel
-    }),
-  ];
-  // App-icon badge count (the server sends the unread total as p.badge).
-  if (self.navigator && self.navigator.setAppBadge && typeof p.badge === 'number') {
-    jobs.push(self.navigator.setAppBadge(p.badge).catch(() => {}));
-  }
-  event.waitUntil(Promise.all(jobs));
+    });
+  })());
 });
 
 // Tapping a notification jumps to its channel: focus an existing window and
