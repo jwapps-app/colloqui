@@ -21,11 +21,11 @@ import os
 import uuid
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 
 from .config import settings
 from .db import SessionLocal
-from .models import Notification, PushSubscription
+from .models import PushSubscription
 
 log = logging.getLogger("webpush")
 
@@ -132,7 +132,9 @@ def public_key() -> str:
     return _keys["public"] if _keys else ""
 
 
-async def _deliver(user_id: uuid.UUID, title: str, body: str, data: dict | None) -> None:
+async def _deliver(
+    user_id: uuid.UUID, title: str, body: str, data: dict | None, badge: int
+) -> None:
     from pywebpush import WebPushException, webpush
 
     keys = _keys
@@ -146,13 +148,8 @@ async def _deliver(user_id: uuid.UUID, title: str, body: str, data: dict | None)
         ).all()
         if not subs:
             return
-        badge = await db.scalar(
-            select(func.count())
-            .select_from(Notification)
-            .where(Notification.user_id == user_id, Notification.read_at.is_(None))
-        )
         payload = json.dumps(
-            {"title": title, "body": body, "data": data or {}, "badge": badge or 0}
+            {"title": title, "body": body, "data": data or {}, "badge": badge}
         )
         dead: list[str] = []
         for sub in subs:
@@ -185,16 +182,24 @@ async def _deliver(user_id: uuid.UUID, title: str, body: str, data: dict | None)
             await db.commit()
 
 
-async def _safe_deliver(user_id, title, body, data) -> None:
+async def _safe_deliver(user_id, title, body, data, badge) -> None:
     try:
-        await _deliver(user_id, title, body, data)
+        await _deliver(user_id, title, body, data, badge)
     except Exception:
         log.exception("web push delivery failed for user %s", user_id)
 
 
-def schedule(user_id: uuid.UUID, title: str, body: str, data: dict | None = None) -> None:
-    """Fire-and-forget a web push to all of a user's PWA subscriptions. No-op
-    unless keys are configured. Never blocks or raises into the caller."""
+def schedule(
+    user_id: uuid.UUID,
+    title: str,
+    body: str,
+    data: dict | None = None,
+    badge: int = 0,
+) -> None:
+    """Fire-and-forget a web push to all of a user's PWA subscriptions. `badge`
+    is the unread total to show on the app icon (computed by the caller in the
+    same transaction). No-op unless keys are configured; never blocks or raises
+    into the caller."""
     if not web_push_enabled():
         return
-    asyncio.create_task(_safe_deliver(user_id, title, body, data))
+    asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))

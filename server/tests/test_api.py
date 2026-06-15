@@ -621,7 +621,7 @@ async def test_push_apns(monkeypatch, make_user):
             return FakeResp(410 if url.endswith("/DEAD") else 200)
 
     monkeypatch.setattr(push.httpx, "AsyncClient", FakeClient)
-    await push._deliver(c_id, "hi", "there", {"channel_id": "x"})
+    await push._deliver(c_id, "hi", "there", {"channel_id": "x"}, 7)
 
     assert any(u.endswith("/LIVE") for u in sent) and any(u.endswith("/DEAD") for u in sent)
     async with SessionLocal() as db:
@@ -911,6 +911,7 @@ async def test_vapid_endpoint(client, monkeypatch, tmp_path):
 
 async def test_web_push_send(monkeypatch, make_user):
     import base64
+    import json
 
     import pywebpush
     from py_vapid import Vapid01
@@ -945,6 +946,7 @@ async def test_web_push_send(monkeypatch, make_user):
         await db.commit()
 
     sent: list[str] = []
+    payloads: list[str] = []
 
     class Resp:
         def __init__(self, status): self.status_code = status
@@ -952,14 +954,17 @@ async def test_web_push_send(monkeypatch, make_user):
     def fake_webpush(subscription_info, data, vapid_private_key, vapid_claims, ttl=None):
         ep = subscription_info["endpoint"]
         sent.append(ep)
+        payloads.append(data)
         if ep.endswith("/DEAD"):
             raise pywebpush.WebPushException("gone", response=Resp(410))
 
     monkeypatch.setattr(pywebpush, "webpush", fake_webpush)
 
-    await webpush._deliver(c_id, "hi", "there", {"channel_id": "x"})
+    await webpush._deliver(c_id, "hi", "there", {"channel_id": "x"}, 4)
 
     assert any(e.endswith("/LIVE") for e in sent) and any(e.endswith("/DEAD") for e in sent)
+    # The caller-supplied badge count rides in the payload.
+    assert all(json.loads(p)["badge"] == 4 for p in payloads)
     async with SessionLocal() as db:
         left = [s.endpoint for s in (await db.scalars(
             select(PushSubscription).where(PushSubscription.user_id == c_id))).all()]

@@ -3,7 +3,7 @@ import logging
 import uuid
 
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import push, webpush
@@ -55,12 +55,23 @@ async def notify_user(
             [user_id],
             {"type": "alert", "title": title, "body": body, "data": data},
         )
+    # Badge count = this user's unread notifications. Compute it HERE, in the
+    # same transaction that just added the new one (visible after flush), so the
+    # number we ship is correct. Computing it later in the push task's own
+    # session raced the request's commit and shipped a stale/too-low count —
+    # which is why the app-icon badge often didn't update until you opened the
+    # app and it recomputed.
+    badge = await db.scalar(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.user_id == user_id, Notification.read_at.is_(None))
+    )
     # Push to the user's other surfaces (both inbox items and transient
     # "all"-level alerts). Each is a no-op unless configured; fire-and-forget,
     # never blocks here. APNs reaches the native iOS app; web push reaches
     # installed PWAs (incl. iOS) when they're backgrounded or closed.
-    push.schedule(user_id, title, body, data)
-    webpush.schedule(user_id, title, body, data)
+    push.schedule(user_id, title, body, data, badge or 0)
+    webpush.schedule(user_id, title, body, data, badge or 0)
     return notification
 
 

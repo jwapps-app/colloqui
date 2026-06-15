@@ -14,11 +14,11 @@ import uuid
 
 import httpx
 import jwt
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 
 from .config import settings
 from .db import SessionLocal
-from .models import DeviceToken, Notification
+from .models import DeviceToken
 
 log = logging.getLogger("push")
 
@@ -77,7 +77,9 @@ def _build_payload(title: str, body: str, data: dict | None, badge: int) -> byte
     return json.dumps(payload).encode()
 
 
-async def _deliver(user_id: uuid.UUID, title: str, body: str, data: dict | None) -> None:
+async def _deliver(
+    user_id: uuid.UUID, title: str, body: str, data: dict | None, badge: int
+) -> None:
     key_pem = _key_pem()
     if not push_enabled() or key_pem is None:
         return
@@ -89,14 +91,9 @@ async def _deliver(user_id: uuid.UUID, title: str, body: str, data: dict | None)
         ).all()
         if not tokens:
             return
-        badge = await db.scalar(
-            select(func.count())
-            .select_from(Notification)
-            .where(Notification.user_id == user_id, Notification.read_at.is_(None))
-        )
         host = _HOST_SANDBOX if settings.apns_sandbox else _HOST_PROD
         provider = _provider_jwt(key_pem, time.time())
-        content = _build_payload(title, body, data, badge or 0)
+        content = _build_payload(title, body, data, badge)
         headers = {
             "authorization": f"bearer {provider}",
             "apns-topic": settings.apns_topic,
@@ -135,16 +132,23 @@ async def _deliver(user_id: uuid.UUID, title: str, body: str, data: dict | None)
             await db.commit()
 
 
-async def _safe_deliver(user_id, title, body, data) -> None:
+async def _safe_deliver(user_id, title, body, data, badge) -> None:
     try:
-        await _deliver(user_id, title, body, data)
+        await _deliver(user_id, title, body, data, badge)
     except Exception:
         log.exception("push delivery failed for user %s", user_id)
 
 
-def schedule(user_id: uuid.UUID, title: str, body: str, data: dict | None = None) -> None:
-    """Fire-and-forget an APNs push to all of a user's devices. No-op unless
-    APNs is configured. Never blocks or raises into the caller."""
+def schedule(
+    user_id: uuid.UUID,
+    title: str,
+    body: str,
+    data: dict | None = None,
+    badge: int = 0,
+) -> None:
+    """Fire-and-forget an APNs push to all of a user's devices. `badge` is the
+    unread total (computed by the caller in the same transaction). No-op unless
+    APNs is configured; never blocks or raises into the caller."""
     if not push_enabled():
         return
-    asyncio.create_task(_safe_deliver(user_id, title, body, data))
+    asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))
