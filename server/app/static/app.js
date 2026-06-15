@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '88';
+const APP_VERSION = '89';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -65,11 +65,29 @@ function setViewportHeight() {
 // the body is position:fixed, so that scroll just drags the whole UI (and the
 // keyboard) up into a broken, stuck state. We already shrink #app to sit above
 // the keyboard, so the scroll is unwanted: undo it on every viewport change.
+// Whether the message list is pinned to the latest message. Updated on scroll
+// (see `messages` onscroll); used to keep it pinned across keyboard reflows.
+let stickBottom = true;
+let _lastVH = 0;
+function keepMessagesPinned() {
+  const app = document.getElementById('app');
+  if (!app || !app.classList.contains('chat-open')) return;  // no channel open
+  const box = document.getElementById('messages');
+  if (box && stickBottom) box.scrollTop = box.scrollHeight;
+}
 function pinViewport() {
   setViewportHeight();
   if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
   const se = document.scrollingElement;
   if (se && se.scrollTop) se.scrollTop = 0;
+  // When the keyboard opens/closes, --vh changes and the list reflows. If the
+  // user was reading the latest messages, keep them there instead of stranding
+  // them at the oldest message up top.
+  const vh = parseInt(document.documentElement.style.getPropertyValue('--vh'), 10) || 0;
+  if (vh !== _lastVH) {
+    _lastVH = vh;
+    keepMessagesPinned();
+  }
 }
 pinViewport();
 let _vhTicks = 0;
@@ -801,6 +819,8 @@ async function selectChannel(ch) {
   box.innerHTML = '';
   messages.forEach(renderMessage);
   box.scrollTop = box.scrollHeight;
+  stickBottom = true;
+  _lastVH = parseInt(document.documentElement.style.getPropertyValue('--vh'), 10) || 0;
   oldestMessageId = messages.length ? messages[0].id : null;
   allHistoryLoaded = messages.length < 100;
   loadingOlder = false;
@@ -3416,7 +3436,11 @@ $('calendar-copy').onclick = copyCalendarUrl;
 $('calendar-regen').onclick = regenerateCalendarUrl;
 $('avatar-btn').onclick = () => $('avatar-input').click();
 $('avatar-input').onchange = uploadAvatar;
-$('messages').onscroll = maybeLoadOlder;
+$('messages').onscroll = () => {
+  const box = $('messages');
+  stickBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  maybeLoadOlder();
+};
 $('add-passkey').onclick = addPasskey;
 $('pw-save').onclick = savePassword;
 $('pw-remove').onclick = removePassword;
