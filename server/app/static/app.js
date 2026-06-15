@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '94';
+const APP_VERSION = '95';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -40,37 +40,20 @@ fetch('/healthz').then(r => r.json()).then(d => {
   if (el && d && d.version) el.textContent = d.version === 'dev' ? 'dev' : d.version;
 }).catch(() => {});
 
-// Pin the layout height (--vh) to the real full screen. The hard part is iOS
-// standalone: on notch/Dynamic-Island phones `window.innerHeight` comes back
-// SHORT by the top safe-area inset (e.g. 793 on an 852pt screen) while the
-// content is pinned to the top, so the missing strip lands as a gap at the
-// BOTTOM. innerHeight, visualViewport and position:fixed all report the short
-// value; only screen.height knows the true full height. So when we're running
-// as an installed app in portrait, we drive the height from screen.height.
-// When the keyboard is open we instead use visualViewport.height (the genuinely
-// visible area above the keyboard) so the composer rides just above it; a 120px
-// threshold separates a real keyboard from the safe-area discrepancy.
-let _dbg = location.search.includes('debug');
-function isStandalone() {
-  return window.navigator.standalone === true ||
-    matchMedia('(display-mode: standalone)').matches;
-}
+// Pin the layout height (--vh) to what the web view can actually paint. The
+// `apple-mobile-web-app-status-bar-style: black` meta seats the iOS standalone
+// canvas below the status bar, so window.innerHeight is the true paintable
+// height and fills to the bottom. When the keyboard is open we instead use
+// visualViewport.height (the visible area above it) so the composer rides just
+// above the keyboard; a 120px threshold separates a real keyboard from
+// safe-area jitter.
 function setViewportHeight() {
   const vv = window.visualViewport;
   const inner = window.innerHeight;
   const kb = vv ? Math.max(0, inner - vv.height - vv.offsetTop) : 0;
-  // Use the PAINTABLE height. innerHeight (e.g. 793) is what the web view can
-  // actually render into; screen.height (852) is layout-only on iOS standalone —
-  // the bottom strip there is OS chrome that no element can paint, so sizing to
-  // it just clips content. When the keyboard is open, fit the area above it.
   const h = (kb > 120 && vv) ? vv.height : inner;
   document.documentElement.style.setProperty('--vh', Math.round(h) + 'px');
-  if (_dbg) showDebug(kb, h);
 }
-// When an input is focused, iOS scrolls the layout viewport to reveal it — but
-// the body is position:fixed, so that scroll just drags the whole UI (and the
-// keyboard) up into a broken, stuck state. We already shrink #app to sit above
-// the keyboard, so the scroll is unwanted: undo it on every viewport change.
 // Whether the message list is pinned to the latest message. Updated on scroll
 // (see `messages` onscroll); used to keep it pinned across keyboard reflows.
 let stickBottom = true;
@@ -81,6 +64,10 @@ function keepMessagesPinned() {
   const box = document.getElementById('messages');
   if (box && stickBottom) box.scrollTop = box.scrollHeight;
 }
+// On every viewport change: re-measure, then undo iOS's scroll-into-view. When
+// an input is focused, iOS scrolls the layout viewport to reveal it — but the
+// body is position:fixed, so that scroll drags the whole UI (and the keyboard)
+// up into a stuck state. We already shrink #app above the keyboard, so reset it.
 function pinViewport() {
   setViewportHeight();
   if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
@@ -119,71 +106,6 @@ document.addEventListener('focusin', () => {
   setTimeout(pinViewport, 50);
   setTimeout(pinViewport, 300);
 });
-
-// Diagnostic overlay of live viewport metrics. Toggle it by tapping the version
-// label 3× (works inside the installed app, which has no address bar for
-// ?debug). Read these numbers off to me if a layout gap persists, so we can
-// pinpoint it instead of guessing.
-let _sabProbe;
-function safeAreaBottom() {
-  if (!_sabProbe) {
-    _sabProbe = document.createElement('div');
-    _sabProbe.style.cssText = 'position:fixed;left:-9999px;bottom:0;' +
-      'height:0;padding-bottom:env(safe-area-inset-bottom,0px)';
-    document.body.appendChild(_sabProbe);
-  }
-  return Math.round(parseFloat(getComputedStyle(_sabProbe).paddingBottom) || 0);
-}
-let _unitProbe;
-function cssUnit(unit) {  // measure what e.g. 100dvh resolves to, in px
-  if (!_unitProbe) {
-    _unitProbe = document.createElement('div');
-    _unitProbe.style.cssText = 'position:fixed;left:-9999px;top:0;width:0';
-    document.body.appendChild(_unitProbe);
-  }
-  _unitProbe.style.height = '100' + unit;
-  return Math.round(_unitProbe.getBoundingClientRect().height);
-}
-function showDebug(kb, h) {
-  let el = document.getElementById('vp-debug');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'vp-debug';
-    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
-      'background:rgba(0,0,0,.85);color:#0f0;font:11px/1.5 monospace;' +
-      'padding:4px 8px;white-space:pre-wrap;pointer-events:none';
-    document.body.appendChild(el);
-  }
-  const vv = window.visualViewport;
-  el.textContent =
-    `screen ${screen.width}x${screen.height} dpr ${devicePixelRatio}\n` +
-    `innerH ${window.innerHeight}  vv.h ${vv ? Math.round(vv.height) : '-'}` +
-    `  vv.offTop ${vv ? Math.round(vv.offsetTop) : '-'}\n` +
-    `dvh ${cssUnit('dvh')} lvh ${cssUnit('lvh')} svh ${cssUnit('svh')} ` +
-    `vh ${cssUnit('vh')}\n` +
-    `safe-bottom ${safeAreaBottom()}px  kb ${kb}  --vh ${h}  ` +
-    `app.h ${document.getElementById('app')?.offsetHeight || '-'}\n` +
-    `standalone ${isStandalone()}`;
-}
-// Triple-tap the brand/version to toggle the overlay in the installed app.
-(function () {
-  const target = document.querySelector('#sidebar-top .brand') ||
-    document.getElementById('ver');
-  if (!target) return;
-  target.style.cursor = 'pointer';
-  let taps = 0, timer;
-  target.addEventListener('click', () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => { taps = 0; }, 600);
-    if (++taps >= 3) {
-      taps = 0;
-      _dbg = !_dbg;
-      const el = document.getElementById('vp-debug');
-      if (!_dbg && el) el.remove();
-      else setViewportHeight();
-    }
-  });
-})();
 
 // ---------- helpers ----------
 
