@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '90';
+const APP_VERSION = '91';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -455,6 +455,21 @@ function signOutLocal() {
 }
 
 async function signOut() {
+  // Drop this device's push subscription first (needs the session token), so a
+  // signed-out device stops receiving notifications.
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    const sub = await reg?.pushManager.getSubscription();
+    if (sub) {
+      const j = sub.toJSON();
+      await api('/push/subscribe', {
+        method: 'DELETE',
+        body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }),
+      });
+      await sub.unsubscribe();
+    }
+  } catch {}
+  _pushSetupDone = false;
   try { await api('/auth/logout', { method: 'POST' }); } catch {}
   signOutLocal();
 }
@@ -2278,7 +2293,8 @@ async function clearNotifications() {
 async function openNotifs() {
   $('notifs').classList.remove('hidden');
   if (window.Notification && Notification.permission === 'default') {
-    Notification.requestPermission();
+    const perm = await Notification.requestPermission();
+    if (perm === 'granted') setupPushSubscription();
   }
   await Promise.all([loadReminders(), loadNotifications()]);
   if (notifUnread > 0) {
@@ -2290,9 +2306,48 @@ async function openNotifs() {
 
 function maybeBrowserNotify(n) {
   if (document.visibilityState === 'visible') return;
-  if (window.Notification && Notification.permission === 'granted') {
-    new Notification(n.title, { body: n.body });
+  // `new Notification()` is a desktop-only fallback for a foreground-but-hidden
+  // tab; iOS doesn't support it. Background/closed delivery is Web Push (the
+  // service worker `push` handler), set up via setupPushSubscription().
+  if (window.Notification && Notification.permission === 'granted'
+      && typeof Notification === 'function') {
+    try { new Notification(n.title, { body: n.body }); } catch {}
   }
+}
+
+// Web Push subscription: hand the server this device's push endpoint so it can
+// deliver notifications while the PWA is backgrounded/closed. No-op unless the
+// browser supports push, permission is granted, and the server has VAPID set.
+let _pushSetupDone = false;
+function urlBase64ToUint8Array(base64) {
+  const pad = '='.repeat((4 - base64.length % 4) % 4);
+  const raw = atob((base64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+async function setupPushSubscription() {
+  if (_pushSetupDone || !token) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  if (!window.Notification || Notification.permission !== 'granted') return;
+  try {
+    const { key } = await api('/push/vapid');
+    if (!key) return;  // server hasn't configured web push
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key),
+      });
+    }
+    const j = sub.toJSON();
+    await api('/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }),
+    });
+    _pushSetupDone = true;
+  } catch { /* push is best-effort; never break the app */ }
 }
 
 // ---------- open tasks ----------
@@ -3211,6 +3266,7 @@ async function showApp() {
     updateNotifBadge();
   } catch {}
   refreshTaskCount();
+  setupPushSubscription();  // if permission was already granted on a prior visit
 }
 
 // ---------- wiring ----------

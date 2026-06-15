@@ -321,6 +321,22 @@ class DeviceToken(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PushSubscription(Base):
+    """A Web Push (VAPID) subscription for a user's installed PWA. Keyed by the
+    push-service endpoint URL; re-subscribing reassigns it, and endpoints the
+    push service rejects as gone (404 / 410) are pruned on send."""
+
+    __tablename__ = "push_subscriptions"
+
+    endpoint: Mapped[str] = mapped_column(String(500), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    p256dh: Mapped[str] = mapped_column(String(200))
+    auth: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class MessageChange(Base):
     """Change-log for offline sync: one row per message that has been created,
     edited, reacted to, pinned, checked, or deleted since the feature shipped.

@@ -816,3 +816,110 @@ async def test_security_headers_and_login_enumeration(client, make_user):
     ok = await client.post("/api/v1/auth/login/password",
                            json={"username": "zoe", "password": "correcthorse1"})
     assert ok.status_code == 200 and ok.json()["token"]
+
+
+async def test_push_subscribe(client, make_user):
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import PushSubscription
+
+    a_tok, a_id = await make_user("paul")
+    b_tok, b_id = await make_user("quinn")
+
+    sub = {"endpoint": "https://push.example/abc",
+           "keys": {"p256dh": "KEYP", "auth": "KEYA"}}
+    assert (await client.post("/api/v1/push/subscribe", headers=auth(a_tok),
+            json=sub)).status_code == 204
+    async with SessionLocal() as db:
+        row = await db.get(PushSubscription, sub["endpoint"])
+        assert row is not None and str(row.user_id) == str(a_id) and row.p256dh == "KEYP"
+
+    # Same endpoint re-subscribing reassigns it and refreshes keys (one row).
+    sub2 = {"endpoint": sub["endpoint"], "keys": {"p256dh": "NEWP", "auth": "NEWA"}}
+    assert (await client.post("/api/v1/push/subscribe", headers=auth(b_tok),
+            json=sub2)).status_code == 204
+    async with SessionLocal() as db:
+        rows = (await db.scalars(select(PushSubscription).where(
+            PushSubscription.endpoint == sub["endpoint"]))).all()
+        assert len(rows) == 1 and str(rows[0].user_id) == str(b_id)
+        assert rows[0].p256dh == "NEWP"
+
+    # A non-owner can't delete it; the owner can.
+    assert (await client.request("DELETE", "/api/v1/push/subscribe",
+            headers=auth(a_tok), json=sub)).status_code == 204
+    async with SessionLocal() as db:
+        assert await db.get(PushSubscription, sub["endpoint"]) is not None
+    assert (await client.request("DELETE", "/api/v1/push/subscribe",
+            headers=auth(b_tok), json=sub2)).status_code == 204
+    async with SessionLocal() as db:
+        assert await db.get(PushSubscription, sub["endpoint"]) is None
+
+
+async def test_vapid_endpoint(client, monkeypatch):
+    from app import webpush
+    from app.config import settings
+
+    # Empty until configured; the client uses that to skip subscribing.
+    assert (await client.get("/api/v1/push/vapid")).json() == {"key": ""}
+    monkeypatch.setattr(settings, "vapid_public_key", "PUBKEY")
+    monkeypatch.setattr(settings, "vapid_private_key", "PRIVKEY")
+    monkeypatch.setattr(settings, "vapid_subject", "mailto:a@b.c")
+    webpush._vapid_cache.clear()
+    assert (await client.get("/api/v1/push/vapid")).json() == {"key": "PUBKEY"}
+
+
+async def test_web_push_send(monkeypatch, make_user):
+    import base64
+
+    import pywebpush
+    from py_vapid import Vapid01
+    from sqlalchemy import select
+
+    from app import webpush
+    from app.config import settings
+    from app.db import SessionLocal
+    from app.models import PushSubscription
+
+    # Disabled (and a no-op) until configured.
+    assert webpush.web_push_enabled() is False
+
+    v = Vapid01()
+    v.generate_keys()
+    priv = base64.urlsafe_b64encode(
+        v.private_key.private_numbers().private_value.to_bytes(32, "big")
+    ).rstrip(b"=").decode()
+    monkeypatch.setattr(settings, "vapid_private_key", priv)
+    monkeypatch.setattr(settings, "vapid_public_key", "PUB")
+    monkeypatch.setattr(settings, "vapid_subject", "mailto:a@b.c")
+    webpush._vapid_cache.clear()
+    assert webpush.web_push_enabled() is True
+
+    _, c_id = await make_user("sam")
+    async with SessionLocal() as db:
+        db.add(PushSubscription(endpoint="https://push/LIVE", user_id=c_id,
+                                p256dh="P", auth="A"))
+        db.add(PushSubscription(endpoint="https://push/DEAD", user_id=c_id,
+                                p256dh="P", auth="A"))
+        await db.commit()
+
+    sent: list[str] = []
+
+    class Resp:
+        def __init__(self, status): self.status_code = status
+
+    def fake_webpush(subscription_info, data, vapid_private_key, vapid_claims, ttl=None):
+        ep = subscription_info["endpoint"]
+        sent.append(ep)
+        if ep.endswith("/DEAD"):
+            raise pywebpush.WebPushException("gone", response=Resp(410))
+
+    monkeypatch.setattr(pywebpush, "webpush", fake_webpush)
+
+    await webpush._deliver(c_id, "hi", "there", {"channel_id": "x"})
+
+    assert any(e.endswith("/LIVE") for e in sent) and any(e.endswith("/DEAD") for e in sent)
+    async with SessionLocal() as db:
+        left = [s.endpoint for s in (await db.scalars(
+            select(PushSubscription).where(PushSubscription.user_id == c_id))).all()]
+    assert left == ["https://push/LIVE"]  # DEAD was pruned

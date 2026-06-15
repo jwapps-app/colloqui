@@ -23,6 +23,7 @@ from .routes import (
     spaces,
     users,
     webhooks,
+    webpush,
 )
 
 # Schema is managed by Alembic (`alembic upgrade head` runs at container start,
@@ -134,6 +135,7 @@ for router in (
     reminders.router,
     notifications.router,
     devices.router,
+    webpush.router,
     admin.router,
     webhooks.router,
     webhooks.public_router,

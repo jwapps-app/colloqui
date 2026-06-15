@@ -15,6 +15,35 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Web Push: show the notification the server sent (works when the PWA is
+// backgrounded or closed — the only way iOS delivers notifications at all).
+self.addEventListener('push', (event) => {
+  let p = {};
+  try { p = event.data ? event.data.json() : {}; } catch (e) {}
+  const data = p.data || {};
+  event.waitUntil(
+    self.registration.showNotification(p.title || 'Colloqui', {
+      body: p.body || '',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      data,
+      tag: data.channel_id || undefined,  // coalesce per-channel
+    })
+  );
+});
+
+// Tapping a notification focuses an existing window, or opens the app.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const w of wins) {
+      if ('focus' in w) return w.focus();
+    }
+    if (self.clients.openWindow) return self.clients.openWindow('/');
+  })());
+});
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);

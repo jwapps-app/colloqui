@@ -64,6 +64,39 @@ talks to Apple directly with your own signing key — no third-party push gatewa
 The iOS app registers its device token via `POST /api/v1/devices`; dead tokens are
 pruned automatically. Per-channel mute is respected before a push is ever sent.
 
+### Web Push (PWA notifications) — optional
+
+Notifications for the installed web app (Add to Home Screen), including on iOS
+16.4+. Like APNs, this is a **silent no-op until configured**. We sign with our
+own VAPID keys and POST straight to the browser's push service — no third-party
+gateway. (The delivery hop itself necessarily routes through the browser vendor's
+push service: Apple for iOS/Safari, Google for Chrome, Mozilla for Firefox —
+there is no self-hosted web-push transport. Same unavoidable hop as APNs.)
+
+Generate a VAPID keypair once:
+
+```bash
+python -c "
+import base64
+from py_vapid import Vapid01
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+v = Vapid01(); v.generate_keys()
+priv = base64.urlsafe_b64encode(v.private_key.private_numbers().private_value.to_bytes(32,'big')).rstrip(b'=').decode()
+pub = base64.urlsafe_b64encode(v.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)).rstrip(b'=').decode()
+print('VAPID_PRIVATE_KEY=' + priv); print('VAPID_PUBLIC_KEY=' + pub)"
+```
+
+| Variable             | What it is                                                          |
+|----------------------|--------------------------------------------------------------------|
+| `VAPID_PRIVATE_KEY`  | base64url private key from the snippet above. Never commit it.      |
+| `VAPID_PUBLIC_KEY`   | base64url public key (the app server key sent to browsers)          |
+| `VAPID_SUBJECT`      | A contact URL, e.g. `mailto:you@example.com`                        |
+
+The PWA subscribes via `POST /api/v1/push/subscribe` after the user grants
+notification permission; dead subscriptions (404/410) are pruned automatically.
+Notifications fire through the single `notify_user()` seam, so both APNs and Web
+Push are delivered together when configured.
+
 ### About passkeys vs. passwords and addresses
 
 Passkeys are a browser security feature bound to **one origin** and only work in

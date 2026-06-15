@@ -125,6 +125,18 @@ class DeviceRegisterIn(BaseModel):
     platform: str = Field(default="ios", max_length=16)
 
 
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=200)
+    auth: str = Field(min_length=1, max_length=100)
+
+
+class PushSubscriptionIn(BaseModel):
+    """The browser's PushSubscription.toJSON() shape."""
+
+    endpoint: str = Field(min_length=1, max_length=500)
+    keys: PushSubscriptionKeys
+
+
 class WebhookIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
