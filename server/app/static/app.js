@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '83';
+const APP_VERSION = '84';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -41,7 +41,7 @@ fetch('/healthz').then(r => r.json()).then(d => {
 // A threshold ignores small safe-area/toolbar deltas, so --kb is 0 (full
 // screen, no gap) whenever no real keyboard is open, and restores instantly on
 // close.
-const _dbg = location.search.includes('debug');
+let _dbg = location.search.includes('debug');
 function setKeyboardInset() {
   const vv = window.visualViewport;
   let kb = 0;
@@ -65,28 +65,60 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) setKeyboardInset();
 });
 
-// Append ?debug to the URL to overlay live viewport measurements — read these
-// off to me if a layout gap persists so we can pinpoint it instead of guessing.
+// Diagnostic overlay of live viewport metrics. Toggle it by tapping the version
+// label 3× (works inside the installed app, which has no address bar for
+// ?debug). Read these numbers off to me if a layout gap persists, so we can
+// pinpoint it instead of guessing.
+let _sabProbe;
+function safeAreaBottom() {
+  if (!_sabProbe) {
+    _sabProbe = document.createElement('div');
+    _sabProbe.style.cssText = 'position:fixed;left:-9999px;bottom:0;' +
+      'height:0;padding-bottom:env(safe-area-inset-bottom,0px)';
+    document.body.appendChild(_sabProbe);
+  }
+  return Math.round(parseFloat(getComputedStyle(_sabProbe).paddingBottom) || 0);
+}
 function showDebug(kb) {
   let el = document.getElementById('vp-debug');
   if (!el) {
     el = document.createElement('div');
     el.id = 'vp-debug';
     el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
-      'background:rgba(0,0,0,.8);color:#0f0;font:11px/1.4 monospace;' +
+      'background:rgba(0,0,0,.85);color:#0f0;font:11px/1.5 monospace;' +
       'padding:4px 8px;white-space:pre-wrap;pointer-events:none';
     document.body.appendChild(el);
   }
   const vv = window.visualViewport;
-  const sab = getComputedStyle(document.documentElement)
-    .getPropertyValue('--probe-sab') || '?';
+  const standalone = (window.navigator.standalone === true) ||
+    matchMedia('(display-mode: standalone)').matches;
   el.textContent =
     `screen ${screen.width}x${screen.height} dpr ${devicePixelRatio}\n` +
     `innerH ${window.innerHeight}  vv.h ${vv ? Math.round(vv.height) : '-'}` +
     `  vv.offTop ${vv ? Math.round(vv.offsetTop) : '-'}\n` +
-    `--kb ${kb}  safe-bottom ${sab.trim()}  ` +
-    `app.h ${document.getElementById('app')?.offsetHeight || '-'}`;
+    `safe-bottom ${safeAreaBottom()}px  --kb ${kb}  ` +
+    `app.h ${document.getElementById('app')?.offsetHeight || '-'}\n` +
+    `standalone ${standalone}`;
 }
+// Triple-tap the brand/version to toggle the overlay in the installed app.
+(function () {
+  const target = document.querySelector('#sidebar-top .brand') ||
+    document.getElementById('ver');
+  if (!target) return;
+  target.style.cursor = 'pointer';
+  let taps = 0, timer;
+  target.addEventListener('click', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { taps = 0; }, 600);
+    if (++taps >= 3) {
+      taps = 0;
+      _dbg = !_dbg;
+      const el = document.getElementById('vp-debug');
+      if (!_dbg && el) el.remove();
+      else setKeyboardInset();
+    }
+  });
+})();
 
 // ---------- helpers ----------
 

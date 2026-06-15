@@ -5,7 +5,6 @@
   --text: #e7e6ee; --muted: #918da0;
   --accent: #6b63e5; --accent-rgb: 107, 99, 229; --danger: #e0604f;
   color-scheme: dark;  /* native date/select/scrollbar controls render dark */
-  --probe-sab: env(safe-area-inset-bottom, 0px);  /* readable by the ?debug overlay */
 }
 html { height: 100%; }
 body {
