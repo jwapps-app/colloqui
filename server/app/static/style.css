@@ -122,7 +122,7 @@ button:hover { filter: brightness(1.1); }
 }
 #sidebar-top { border-bottom: 1px solid var(--line); }
 #sidebar-top .brand { color: var(--text); }
-#ver { font-size: 10px; color: var(--muted); font-weight: 400; }
+#ver { font-size: 10px; color: var(--muted); font-weight: 400; margin-right: 6px; white-space: nowrap; }
 #sidebar-footer { border-top: 1px solid var(--line); }
 #sidebar-top button, #sidebar-footer button { font-size: 12px; padding: 4px 9px; }
 #sidebar-top #tasks-btn,
