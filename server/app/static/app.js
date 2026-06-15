@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '91';
+const APP_VERSION = '92';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2134,6 +2134,13 @@ function updateNotifBadge() {
   badge.classList.toggle('hidden', notifUnread === 0);
   badge.textContent = notifUnread > 99 ? '99+' : notifUnread;
   $('notifs-btn').classList.toggle('active', notifUnread > 0);
+  // Mirror onto the installed-app icon badge (iOS 16.4+ / desktop PWAs). The
+  // service worker sets it from pushes while closed; this keeps it in sync
+  // while open, so reading notifications clears the home-screen number.
+  if (navigator.setAppBadge) {
+    if (notifUnread > 0) navigator.setAppBadge(notifUnread).catch(() => {});
+    else if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+  }
 }
 
 let taskCountTimer = null;

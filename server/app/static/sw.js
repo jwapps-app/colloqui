@@ -21,15 +21,20 @@ self.addEventListener('push', (event) => {
   let p = {};
   try { p = event.data ? event.data.json() : {}; } catch (e) {}
   const data = p.data || {};
-  event.waitUntil(
+  const jobs = [
     self.registration.showNotification(p.title || 'Colloqui', {
       body: p.body || '',
       icon: '/icon-192.png',
       badge: '/icon-192.png',
       data,
       tag: data.channel_id || undefined,  // coalesce per-channel
-    })
-  );
+    }),
+  ];
+  // App-icon badge count (the server sends the unread total as p.badge).
+  if (self.navigator && self.navigator.setAppBadge && typeof p.badge === 'number') {
+    jobs.push(self.navigator.setAppBadge(p.badge).catch(() => {}));
+  }
+  event.waitUntil(Promise.all(jobs));
 });
 
 // Tapping a notification focuses an existing window, or opens the app.
