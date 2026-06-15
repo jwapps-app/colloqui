@@ -10,13 +10,15 @@ html { height: 100%; }
 body {
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: var(--bg); color: var(--text);
-  /* Pin to the physical screen. In an installed iOS PWA `position: fixed;
-     inset: 0` covers the *entire* screen including the bottom safe area with
-     no dependence on innerHeight/visualViewport/100vh (all of which mis-report
-     the bottom inset in standalone and left a gap). The keyboard is handled by
-     shrinking #app via --kb, set from visualViewport in JS. */
+  /* Full-screen, top-anchored. --vh is set from JS to the true screen height
+     (screen.height in iOS standalone, which corrects innerHeight under-reporting
+     and the resulting bottom gap; visualViewport.height while the keyboard is
+     open). Anchored at the top so the corrected height paints down into the
+     bottom strip that iOS otherwise leaves blank. 100dvh is the pre-JS
+     fallback. */
   position: fixed;
-  inset: 0;
+  top: 0; left: 0; right: 0;
+  height: var(--vh, 100dvh);
   overflow: hidden;
 }
 #back-btn { display: none; }
@@ -107,10 +109,7 @@ button {
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button:hover { filter: brightness(1.1); }
 
-/* Fills the pinned body; shrinks by the on-screen keyboard height (--kb, set
-   from visualViewport) so the composer rides above the keyboard and snaps back
-   to the bottom when it closes. --kb is 0 whenever no keyboard is open. */
-#app { display: flex; height: 100%; height: calc(100% - var(--kb, 0px)); }
+#app { display: flex; height: var(--vh, 100dvh); }
 #app > aside {
   width: 280px; height: 100%; background: var(--panel);
   border-right: 1px solid var(--line);

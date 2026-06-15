@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '84';
+const APP_VERSION = '85';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -34,35 +34,56 @@ fetch('/healthz').then(r => r.json()).then(d => {
   if (el && d && d.version) el.textContent = d.version === 'dev' ? 'dev' : d.version;
 }).catch(() => {});
 
-// The screen is filled by CSS (`body { position: fixed; inset: 0 }`), which is
-// the only reliable full-screen primitive in an installed iOS PWA. JS just
-// measures the on-screen keyboard and exposes it as --kb so #app can shrink to
-// sit above it: kb = how much visualViewport shrank below the layout viewport.
-// A threshold ignores small safe-area/toolbar deltas, so --kb is 0 (full
-// screen, no gap) whenever no real keyboard is open, and restores instantly on
-// close.
+// Pin the layout height (--vh) to the real full screen. The hard part is iOS
+// standalone: on notch/Dynamic-Island phones `window.innerHeight` comes back
+// SHORT by the top safe-area inset (e.g. 793 on an 852pt screen) while the
+// content is pinned to the top, so the missing strip lands as a gap at the
+// BOTTOM. innerHeight, visualViewport and position:fixed all report the short
+// value; only screen.height knows the true full height. So when we're running
+// as an installed app in portrait, we drive the height from screen.height.
+// When the keyboard is open we instead use visualViewport.height (the genuinely
+// visible area above the keyboard) so the composer rides just above it; a 120px
+// threshold separates a real keyboard from the safe-area discrepancy.
 let _dbg = location.search.includes('debug');
-function setKeyboardInset() {
-  const vv = window.visualViewport;
-  let kb = 0;
-  if (vv) {
-    kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
-    if (kb < 120) kb = 0;  // not a keyboard, just safe-area/toolbar jitter
-  }
-  document.documentElement.style.setProperty('--kb', kb + 'px');
-  if (_dbg) showDebug(kb);
+function isStandalone() {
+  return window.navigator.standalone === true ||
+    matchMedia('(display-mode: standalone)').matches;
 }
-setKeyboardInset();
+function setViewportHeight() {
+  const vv = window.visualViewport;
+  const inner = window.innerHeight;
+  const kb = vv ? Math.max(0, inner - vv.height - vv.offsetTop) : 0;
+  let h;
+  if (kb > 120 && vv) {
+    h = vv.height;  // keyboard open: fit the area above it
+  } else {
+    h = inner;
+    // Correct iOS standalone's short innerHeight (portrait only — screen.height
+    // doesn't swap with orientation on iOS, so it's unsafe in landscape).
+    if (isStandalone() && screen.height > h &&
+        matchMedia('(orientation: portrait)').matches) {
+      h = screen.height;
+    }
+  }
+  document.documentElement.style.setProperty('--vh', Math.round(h) + 'px');
+  if (_dbg) showDebug(kb, h);
+}
+setViewportHeight();
+let _vhTicks = 0;
+const _vhWarmup = setInterval(() => {
+  setViewportHeight();
+  if (++_vhTicks > 14) clearInterval(_vhWarmup);  // standalone settles late (~2s)
+}, 150);
 ['resize', 'orientationchange', 'pageshow', 'focus'].forEach(
-  e => window.addEventListener(e, setKeyboardInset)
+  e => window.addEventListener(e, setViewportHeight)
 );
 if (window.visualViewport) {
   // The reliable signal for keyboard open/close on iOS.
-  window.visualViewport.addEventListener('resize', setKeyboardInset);
-  window.visualViewport.addEventListener('scroll', setKeyboardInset);
+  window.visualViewport.addEventListener('resize', setViewportHeight);
+  window.visualViewport.addEventListener('scroll', setViewportHeight);
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) setKeyboardInset();
+  if (!document.hidden) setViewportHeight();
 });
 
 // Diagnostic overlay of live viewport metrics. Toggle it by tapping the version
@@ -79,7 +100,17 @@ function safeAreaBottom() {
   }
   return Math.round(parseFloat(getComputedStyle(_sabProbe).paddingBottom) || 0);
 }
-function showDebug(kb) {
+let _unitProbe;
+function cssUnit(unit) {  // measure what e.g. 100dvh resolves to, in px
+  if (!_unitProbe) {
+    _unitProbe = document.createElement('div');
+    _unitProbe.style.cssText = 'position:fixed;left:-9999px;top:0;width:0';
+    document.body.appendChild(_unitProbe);
+  }
+  _unitProbe.style.height = '100' + unit;
+  return Math.round(_unitProbe.getBoundingClientRect().height);
+}
+function showDebug(kb, h) {
   let el = document.getElementById('vp-debug');
   if (!el) {
     el = document.createElement('div');
@@ -90,15 +121,15 @@ function showDebug(kb) {
     document.body.appendChild(el);
   }
   const vv = window.visualViewport;
-  const standalone = (window.navigator.standalone === true) ||
-    matchMedia('(display-mode: standalone)').matches;
   el.textContent =
     `screen ${screen.width}x${screen.height} dpr ${devicePixelRatio}\n` +
     `innerH ${window.innerHeight}  vv.h ${vv ? Math.round(vv.height) : '-'}` +
     `  vv.offTop ${vv ? Math.round(vv.offsetTop) : '-'}\n` +
-    `safe-bottom ${safeAreaBottom()}px  --kb ${kb}  ` +
+    `dvh ${cssUnit('dvh')} lvh ${cssUnit('lvh')} svh ${cssUnit('svh')} ` +
+    `vh ${cssUnit('vh')}\n` +
+    `safe-bottom ${safeAreaBottom()}px  kb ${kb}  --vh ${h}  ` +
     `app.h ${document.getElementById('app')?.offsetHeight || '-'}\n` +
-    `standalone ${standalone}`;
+    `standalone ${isStandalone()}`;
 }
 // Triple-tap the brand/version to toggle the overlay in the installed app.
 (function () {
@@ -115,7 +146,7 @@ function showDebug(kb) {
       _dbg = !_dbg;
       const el = document.getElementById('vp-debug');
       if (!_dbg && el) el.remove();
-      else setKeyboardInset();
+      else setViewportHeight();
     }
   });
 })();
