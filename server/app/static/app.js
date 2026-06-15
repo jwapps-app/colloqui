@@ -4,6 +4,12 @@
 // version (defeats iOS standalone's stale page cache).
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+  // A tapped notification (app already open) asks us to jump to its channel.
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.type === 'open-channel') {
+      openChannelFromLink(e.data.channelId, e.data.rootId);
+    }
+  });
 }
 
 // Auto-update: iOS standalone caches the start page at the OS level, so a cold
@@ -11,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '93';
+const APP_VERSION = '94';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -750,6 +756,28 @@ function markRead(channelId) {
   api(`/channels/${channelId}/read`, { method: 'POST' }).catch(() => {});
 }
 
+// Opening a channel clears its 🔔 notifications and drops the unread/app badge
+// by however many were cleared (so tapping a push, or just reading the channel,
+// brings the count down).
+async function clearChannelNotifs(channelId) {
+  try {
+    const r = await api(`/notifications/read-channel/${channelId}`, { method: 'POST' });
+    if (r && r.cleared > 0) {
+      notifUnread = Math.max(0, notifUnread - r.cleared);
+      updateNotifBadge();
+      if (!$('notifs').classList.contains('hidden')) loadNotifications();
+    }
+  } catch {}
+}
+
+// Jump to a channel from a notification (service-worker message or ?channel=).
+function openChannelFromLink(channelId, rootId) {
+  const ch = channelById(channelId);
+  if (!ch) return;
+  $('notifs').classList.add('hidden');
+  selectChannel(ch).then(() => { if (rootId) openThread({ id: rootId }); });
+}
+
 function renderChannels() {
   const container = $('spaces-container');
   const dmList = $('dm-list');
@@ -822,6 +850,7 @@ async function selectChannel(ch) {
   closeMention();
   currentChannel = ch;
   if (ch.unread_count) { ch.unread_count = 0; markRead(ch.id); }
+  clearChannelNotifs(ch.id);
   typers.clear(); renderTyping();
   closePreview();
   renderChannels();
@@ -3275,6 +3304,18 @@ async function showApp() {
   } catch {}
   refreshTaskCount();
   setupPushSubscription();  // if permission was already granted on a prior visit
+  maybeOpenDeepLink();      // a push tapped while the app was closed
+}
+
+// On cold launch from a tapped notification the URL carries ?channel=<id>
+// (&root=<id>): open it, then strip the params so reloads land on the app.
+function maybeOpenDeepLink() {
+  const p = new URLSearchParams(location.search);
+  const cid = p.get('channel');
+  if (!cid) return;
+  const rid = p.get('root') || undefined;
+  history.replaceState({}, '', location.pathname);
+  openChannelFromLink(cid, rid);
 }
 
 // ---------- wiring ----------

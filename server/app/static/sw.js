@@ -37,15 +37,30 @@ self.addEventListener('push', (event) => {
   event.waitUntil(Promise.all(jobs));
 });
 
-// Tapping a notification focuses an existing window, or opens the app.
+// Tapping a notification jumps to its channel: focus an existing window and
+// tell it which channel to open, or open the app pointed at that channel.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  const d = event.notification.data || {};
+  const cid = d.channel_id;
+  const rid = d.root_id || d.thread_root_id;
   event.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const w of wins) {
-      if ('focus' in w) return w.focus();
+      if ('focus' in w) {
+        await w.focus();
+        if (cid) w.postMessage({ type: 'open-channel', channelId: cid, rootId: rid });
+        return;
+      }
     }
-    if (self.clients.openWindow) return self.clients.openWindow('/');
+    if (self.clients.openWindow) {
+      let url = '/';
+      if (cid) {
+        url = '/?channel=' + encodeURIComponent(cid);
+        if (rid) url += '&root=' + encodeURIComponent(rid);
+      }
+      return self.clients.openWindow(url);
+    }
   })());
 });
 

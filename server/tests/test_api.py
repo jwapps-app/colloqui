@@ -964,3 +964,42 @@ async def test_web_push_send(monkeypatch, make_user):
         left = [s.endpoint for s in (await db.scalars(
             select(PushSubscription).where(PushSubscription.user_id == c_id))).all()]
     assert left == ["https://push/LIVE"]  # DEAD was pruned
+
+
+async def test_read_channel_notifications(client, make_user):
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("amy")   # poster
+    b_tok, b_id = await make_user("ben")   # recipient
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin_tok),
+          json={"name": "R"})).json()
+    for uid in (a_id, b_id):
+        await client.post(f"/api/v1/spaces/{sp['id']}/members", headers=auth(admin_tok),
+                          json={"user_id": str(uid)})
+    chans = []
+    for name in ("r1", "r2"):
+        ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+              json={"name": name, "space_id": sp["id"]})).json()
+        await client.post(f"/api/v1/channels/{ch['id']}/members", headers=auth(a_tok),
+                          json={"user_id": str(b_id)})
+        await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+                          json={"content": f"hello in {name}"})
+        chans.append(ch)
+
+    async def unread():
+        rows = (await client.get("/api/v1/notifications", headers=auth(b_tok))).json()
+        return [n for n in rows if not n["read_at"]]
+
+    # Ben has a channel notification from each (badging on by default).
+    assert len(await unread()) == 2
+
+    # Reading channel r1 clears only its notification, and reports the count.
+    r = (await client.post(f"/api/v1/notifications/read-channel/{chans[0]['id']}",
+         headers=auth(b_tok))).json()
+    assert r["cleared"] == 1
+    left = await unread()
+    assert len(left) == 1 and left[0]["data"]["channel_id"] == chans[1]["id"]
+
+    # Re-reading is a no-op (already read).
+    r2 = (await client.post(f"/api/v1/notifications/read-channel/{chans[0]['id']}",
+          headers=auth(b_tok))).json()
+    assert r2["cleared"] == 0

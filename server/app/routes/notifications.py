@@ -1,7 +1,8 @@
 import uuid
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import delete, select, update
+from sqlalchemy import cast, delete, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -37,6 +38,27 @@ async def mark_all_read(
         .values(read_at=utcnow())
     )
     return {"ok": True}
+
+
+@router.post("/read-channel/{channel_id}")
+async def mark_channel_read(
+    channel_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Mark the caller's unread notifications for one channel as read — called
+    when they open that channel (e.g. by tapping a push). Returns how many were
+    cleared so the client can drop the badge by that much."""
+    result = await db.execute(
+        update(Notification)
+        .where(
+            Notification.user_id == user.id,
+            Notification.read_at.is_(None),
+            cast(Notification.data, JSONB)["channel_id"].astext == str(channel_id),
+        )
+        .values(read_at=utcnow())
+    )
+    return {"cleared": result.rowcount}
 
 
 @router.delete("", status_code=204)
