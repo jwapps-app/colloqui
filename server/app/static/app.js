@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '92';
+const APP_VERSION = '93';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2770,6 +2770,7 @@ function applyCompact(on) {
 async function openAccount() {
   $('account').classList.remove('hidden');
   $('profile-display').value = me.display_name;
+  $('badge-channels-toggle').checked = me.badge_channel_messages !== false;
   $('compact-toggle').checked = localStorage.getItem('compact') === '1';
   api('/calendar/url').then(r => { $('calendar-url').value = r.url; }).catch(() => {});
   loadPasswordSection();
@@ -3495,6 +3496,15 @@ $('member-add-btn').onclick = addMember;
 $('edit-channel-btn').onclick = editChannel;
 $('profile-save').onclick = saveProfile;
 $('compact-toggle').onchange = e => applyCompact(e.target.checked);
+$('badge-channels-toggle').onchange = async e => {
+  const on = e.target.checked;
+  try {
+    me = await api('/users/me', {
+      method: 'PATCH',
+      body: JSON.stringify({ badge_channel_messages: on }),
+    });
+  } catch (err) { e.target.checked = !on; appAlert(err.message); }
+};
 $('calendar-copy').onclick = copyCalendarUrl;
 $('calendar-regen').onclick = regenerateCalendarUrl;
 $('avatar-btn').onclick = () => $('avatar-input').click();

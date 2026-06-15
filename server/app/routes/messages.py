@@ -782,7 +782,12 @@ async def _notify_for_message(
     # mentions → only when named, all → every message.
     rows = (
         await db.execute(
-            select(User.id, User.username, ChannelNotifyPref.level)
+            select(
+                User.id,
+                User.username,
+                User.badge_channel_messages,
+                ChannelNotifyPref.level,
+            )
             .join(ChannelMember, ChannelMember.user_id == User.id)
             .outerjoin(
                 ChannelNotifyPref,
@@ -798,7 +803,7 @@ async def _notify_for_message(
             )
         )
     ).all()
-    for uid, uname, level in rows:
+    for uid, uname, badge_channel, level in rows:
         level = level or "all"
         if level == "muted":
             continue
@@ -812,7 +817,8 @@ async def _notify_for_message(
                 {"channel_id": str(channel.id)},
             )
         elif level == "all":
-            # Live ping only — don't fill the persistent 🔔 inbox with chatter.
+            # Ordinary channel chatter. By default it lands in the 🔔 inbox and
+            # counts toward the badge; users who opt out get just the live ping.
             await notify_user(
                 db,
                 uid,
@@ -820,7 +826,7 @@ async def _notify_for_message(
                 f"💬 {sender.display_name} in #{channel.name}",
                 snippet,
                 {"channel_id": str(channel.id)},
-                inbox=False,
+                inbox=bool(badge_channel),
             )
 
 

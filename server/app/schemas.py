@@ -16,6 +16,12 @@ class UserOut(BaseModel):
     avatar_at: datetime | None = None
 
 
+class MeOut(UserOut):
+    """Self view — adds personal preferences not exposed in member lists."""
+
+    badge_channel_messages: bool = True
+
+
 class RegisterOptionsIn(BaseModel):
     username: str = Field(pattern=USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=64)
@@ -50,11 +56,12 @@ class VerifyIn(BaseModel):
 
 class TokenOut(BaseModel):
     token: str
-    user: UserOut
+    user: MeOut
 
 
 class UpdateMeIn(BaseModel):
-    display_name: str = Field(min_length=1, max_length=64)
+    display_name: str | None = Field(default=None, min_length=1, max_length=64)
+    badge_channel_messages: bool | None = None
 
 
 class SpaceOut(BaseModel):

@@ -32,13 +32,13 @@ from ..schemas import (
     AddPasskeyIn,
     LoginOptionsIn,
     LoginPasswordIn,
+    MeOut,
     PasskeyOut,
     RegisterOptionsIn,
     RegisterPasswordIn,
     SessionOut,
     SetPasswordIn,
     TokenOut,
-    UserOut,
     VerifyIn,
 )
 from ..security import (
@@ -239,7 +239,7 @@ async def register_verify(
     # Commit before responding: a deferred commit failure would roll back the
     # account *after* the client already saved its passkey and got a 200.
     await db.commit()
-    return TokenOut(token=token, user=UserOut.model_validate(user))
+    return TokenOut(token=token, user=MeOut.model_validate(user))
 
 
 @router.post("/login/options")
@@ -300,7 +300,7 @@ async def login_verify(
     db_cred.last_used_at = utcnow()
     token = await _issue_session(db, user, request)
     await db.commit()
-    return TokenOut(token=token, user=UserOut.model_validate(user))
+    return TokenOut(token=token, user=MeOut.model_validate(user))
 
 
 # ---------- password login (optional, alongside passkeys) ----------
@@ -344,7 +344,7 @@ async def register_password(
     await db.flush()
     token = await _issue_session(db, user, request)
     await db.commit()
-    return TokenOut(token=token, user=UserOut.model_validate(user))
+    return TokenOut(token=token, user=MeOut.model_validate(user))
 
 
 @router.post("/login/password", response_model=TokenOut)
@@ -360,7 +360,7 @@ async def login_password(
         raise HTTPException(401, "Incorrect username or password")
     token = await _issue_session(db, user, request)
     await db.commit()
-    return TokenOut(token=token, user=UserOut.model_validate(user))
+    return TokenOut(token=token, user=MeOut.model_validate(user))
 
 
 @router.get("/password")
@@ -409,7 +409,7 @@ async def remove_password(
     await db.delete(cred)
 
 
-@router.get("/me", response_model=UserOut)
+@router.get("/me", response_model=MeOut)
 async def me(user: User = Depends(get_current_user)) -> User:
     return user
 

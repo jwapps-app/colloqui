@@ -10,7 +10,7 @@ from ..config import settings
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import User, utcnow
-from ..schemas import UpdateMeIn, UserOut
+from ..schemas import MeOut, UpdateMeIn, UserOut
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -34,13 +34,16 @@ async def list_users(
     return list(users)
 
 
-@router.patch("/me", response_model=UserOut)
+@router.patch("/me", response_model=MeOut)
 async def update_me(
     body: UpdateMeIn,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> User:
-    user.display_name = body.display_name
+    if body.display_name is not None:
+        user.display_name = body.display_name
+    if body.badge_channel_messages is not None:
+        user.badge_channel_messages = body.badge_channel_messages
     db.add(user)
     return user
 

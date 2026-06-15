@@ -403,10 +403,23 @@ async def test_channel_notify_prefs(client, make_user, monkeypatch):
         await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
                           json={"content": text})
 
-    # Default 'all': a plain message sends Bob a live alert but no inbox entry.
+    # Default 'all' with channel-message badging on (the default): a plain
+    # message lands in Bob's 🔔 inbox and counts toward his badge.
     await post("hello everyone")
+    assert bob_got("notification") and not bob_got("alert")
+    assert any(n["type"] == "channel" for n in await bob_inbox())
+
+    # Turn channel-message badging off: the same plain message is now a live
+    # alert only, with no inbox entry.
+    await client.patch("/api/v1/users/me", headers=auth(b_tok),
+                       json={"badge_channel_messages": False})
+    inbox_n = len(await bob_inbox())
+    await post("more chatter")
     assert bob_got("alert") and not bob_got("notification")
-    assert await bob_inbox() == []
+    assert len(await bob_inbox()) == inbox_n
+    # Restore the default for the rest of the checks.
+    await client.patch("/api/v1/users/me", headers=auth(b_tok),
+                       json={"badge_channel_messages": True})
 
     # An @mention always lands in the bell inbox.
     await post("@bob ping")

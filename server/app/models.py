@@ -43,6 +43,10 @@ class User(Base):
     avatar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Unguessable token for the private iCal calendar feed (capability URL).
     calendar_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    # When true (default), ordinary channel messages in channels set to "all"
+    # land in the 🔔 inbox and count toward the unread/app badge — not just
+    # @mentions and DMs. Users who find that noisy can switch it off.
+    badge_channel_messages: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class WebAuthnCredential(Base):
