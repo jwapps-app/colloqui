@@ -38,6 +38,26 @@ async def _create_test_db():
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_upload_dir(tmp_path_factory):
+    """Point uploads (and the auto-generated VAPID key file) at a throwaway dir
+    so tests never write into the repo's server tree."""
+    from app.config import settings
+
+    settings.upload_dir = str(tmp_path_factory.mktemp("data"))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_webpush():
+    """Keep VAPID key state from leaking between tests — startup ensure_keys()
+    doesn't run under ASGITransport, so web push should stay off by default."""
+    yield
+    from app import webpush
+
+    webpush.reset_cache()
+
+
 @pytest_asyncio.fixture
 async def app_module(_create_test_db):
     # Rebuild the engine with NullPool bound to *this* test's event loop, so

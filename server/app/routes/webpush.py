@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import webpush
-from ..config import settings
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import PushSubscription, User
@@ -13,9 +12,9 @@ router = APIRouter(prefix="/api/v1/push", tags=["push"])
 
 @router.get("/vapid")
 async def vapid_key() -> dict:
-    """The VAPID application server key the client subscribes with. Empty when
-    web push isn't configured — the client then skips subscribing."""
-    return {"key": settings.vapid_public_key if webpush.web_push_enabled() else ""}
+    """The VAPID application server key the client subscribes with. Empty only
+    if key resolution failed — the client then skips subscribing."""
+    return {"key": webpush.public_key()}
 
 
 @router.post("/subscribe", status_code=204)

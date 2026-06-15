@@ -856,17 +856,44 @@ async def test_push_subscribe(client, make_user):
         assert await db.get(PushSubscription, sub["endpoint"]) is None
 
 
-async def test_vapid_endpoint(client, monkeypatch):
+async def test_vapid_endpoint(client, monkeypatch, tmp_path):
+    import base64
+
+    from py_vapid import Vapid01
+
     from app import webpush
     from app.config import settings
 
-    # Empty until configured; the client uses that to skip subscribing.
+    # Before keys are resolved the endpoint reports none (client skips subscribe).
+    webpush.reset_cache()
     assert (await client.get("/api/v1/push/vapid")).json() == {"key": ""}
-    monkeypatch.setattr(settings, "vapid_public_key", "PUBKEY")
-    monkeypatch.setattr(settings, "vapid_private_key", "PRIVKEY")
-    monkeypatch.setattr(settings, "vapid_subject", "mailto:a@b.c")
-    webpush._vapid_cache.clear()
-    assert (await client.get("/api/v1/push/vapid")).json() == {"key": "PUBKEY"}
+
+    # Auto-managed: with no env keys, startup generates + persists + serves one.
+    monkeypatch.setattr(settings, "vapid_public_key", "")
+    monkeypatch.setattr(settings, "vapid_private_key", "")
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
+    webpush.reset_cache()
+    webpush.ensure_keys()
+    auto = (await client.get("/api/v1/push/vapid")).json()["key"]
+    assert auto  # non-empty, generated
+    assert (tmp_path / "vapid.json").exists()  # persisted
+    # A second resolve loads the same persisted key (doesn't churn it).
+    webpush.reset_cache()
+    webpush.ensure_keys()
+    assert (await client.get("/api/v1/push/vapid")).json()["key"] == auto
+
+    # Explicit env keys override the auto-managed pair.
+    v = Vapid01()
+    v.generate_keys()
+    priv = base64.urlsafe_b64encode(
+        v.private_key.private_numbers().private_value.to_bytes(32, "big")
+    ).rstrip(b"=").decode()
+    monkeypatch.setattr(settings, "vapid_private_key", priv)
+    monkeypatch.setattr(settings, "vapid_public_key", "ENVPUB")
+    webpush.reset_cache()
+    webpush.ensure_keys()
+    assert (await client.get("/api/v1/push/vapid")).json()["key"] == "ENVPUB"
+    webpush.reset_cache()
 
 
 async def test_web_push_send(monkeypatch, make_user):
@@ -881,7 +908,8 @@ async def test_web_push_send(monkeypatch, make_user):
     from app.db import SessionLocal
     from app.models import PushSubscription
 
-    # Disabled (and a no-op) until configured.
+    # Off until keys are resolved (no startup ensure_keys in tests).
+    webpush.reset_cache()
     assert webpush.web_push_enabled() is False
 
     v = Vapid01()
@@ -892,7 +920,7 @@ async def test_web_push_send(monkeypatch, make_user):
     monkeypatch.setattr(settings, "vapid_private_key", priv)
     monkeypatch.setattr(settings, "vapid_public_key", "PUB")
     monkeypatch.setattr(settings, "vapid_subject", "mailto:a@b.c")
-    webpush._vapid_cache.clear()
+    webpush.ensure_keys()
     assert webpush.web_push_enabled() is True
 
     _, c_id = await make_user("sam")

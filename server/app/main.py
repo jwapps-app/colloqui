@@ -68,6 +68,11 @@ async def migrate_existing_to_default_space() -> None:
 async def lifespan(app: FastAPI):
     # Schema migrations have already run (Alembic, at container start).
     Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
+    # Resolve VAPID keys (env, else auto-generate + persist) so web push works
+    # out of the box with zero config.
+    from . import webpush as _webpush
+
+    _webpush.ensure_keys()
     await migrate_existing_to_default_space()
     scheduler = asyncio.create_task(reminder_loop())
     yield
