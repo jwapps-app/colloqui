@@ -11,7 +11,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '85';
+const APP_VERSION = '86';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -53,18 +53,11 @@ function setViewportHeight() {
   const vv = window.visualViewport;
   const inner = window.innerHeight;
   const kb = vv ? Math.max(0, inner - vv.height - vv.offsetTop) : 0;
-  let h;
-  if (kb > 120 && vv) {
-    h = vv.height;  // keyboard open: fit the area above it
-  } else {
-    h = inner;
-    // Correct iOS standalone's short innerHeight (portrait only — screen.height
-    // doesn't swap with orientation on iOS, so it's unsafe in landscape).
-    if (isStandalone() && screen.height > h &&
-        matchMedia('(orientation: portrait)').matches) {
-      h = screen.height;
-    }
-  }
+  // Use the PAINTABLE height. innerHeight (e.g. 793) is what the web view can
+  // actually render into; screen.height (852) is layout-only on iOS standalone —
+  // the bottom strip there is OS chrome that no element can paint, so sizing to
+  // it just clips content. When the keyboard is open, fit the area above it.
+  const h = (kb > 120 && vv) ? vv.height : inner;
   document.documentElement.style.setProperty('--vh', Math.round(h) + 'px');
   if (_dbg) showDebug(kb, h);
 }

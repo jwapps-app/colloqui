@@ -602,7 +602,15 @@ input[type="datetime-local"] { color-scheme: dark; }
 /* Standalone iOS web app: keep top bars clear of the status bar
    (env() is 0 everywhere else, so this is a no-op on desktop). */
 #sidebar-top { padding-top: calc(12px + env(safe-area-inset-top, 0px)); }
-#sidebar-footer { padding-top: 7px; padding-bottom: calc(7px + env(safe-area-inset-bottom, 0px)); }
+/* Match the canvas background (var(--bg)) that bleeds into the bottom OS-chrome
+   strip in an installed iOS PWA, so the footer and that strip read as one — no
+   seam against the panel-coloured sidebar. The channel composer already sits on
+   var(--bg), so it's seamless there too. */
+#sidebar-footer {
+  padding-top: 7px;
+  padding-bottom: calc(7px + env(safe-area-inset-bottom, 0px));
+  background: var(--bg);
+}
 main header { padding-top: calc(6px + env(safe-area-inset-top, 0px)); }
 #app > #preview-pane header { padding-top: calc(6px + env(safe-area-inset-top, 0px)); }
 .center { padding-top: calc(8px + env(safe-area-inset-top, 0px)); }
