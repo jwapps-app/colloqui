@@ -1,7 +1,9 @@
 * { box-sizing: border-box; margin: 0; }
 :root {
-  --bg: #15171c; --panel: #1d2026; --line: #2c313a;
-  --text: #e6e8eb; --muted: #8b919c; --accent: #4f8cff; --danger: #e0604f;
+  /* Purple theme echoing the app icon (#6b63e5 gradient, #5852d6 glyphs). */
+  --bg: #15131c; --panel: #1e1b29; --line: #2e2b40;
+  --text: #e7e6ee; --muted: #918da0;
+  --accent: #6b63e5; --accent-rgb: 107, 99, 229; --danger: #e0604f;
   color-scheme: dark;  /* native date/select/scrollbar controls render dark */
 }
 html { height: 100%; }
@@ -175,7 +177,7 @@ li.active .task-chip { color: #fff; background: rgba(255, 255, 255, .2); }
 }
 .seg button:hover { color: var(--text); }
 .seg button.active {
-  background: rgba(79, 140, 255, .18); border-color: var(--accent); color: var(--text);
+  background: rgba(var(--accent-rgb), .18); border-color: var(--accent); color: var(--text);
 }
 
 /* link preview cards */
@@ -231,7 +233,7 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
 #search-form { padding: 16px 16px 0; }
 #search-form input { width: 100%; font-size: 13px; padding: 8px 12px; }
 #typing { min-height: 20px; font-size: 12px; color: var(--muted); padding: 0 20px 2px; }
-.mention { background: rgba(79, 140, 255, .3); border-radius: 4px; padding: 0 3px; }
+.mention { background: rgba(var(--accent-rgb), .3); border-radius: 4px; padding: 0 3px; }
 .search-hit { cursor: pointer; padding: 8px 10px; border-radius: 8px; margin-bottom: 6px; }
 .search-hit:hover { background: var(--line); }
 .search-hit .where { font-size: 12px; color: var(--accent); margin-bottom: 2px; }
@@ -263,7 +265,7 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
 .task-item .task-where { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .msg.flash { animation: flashbg 1.6s ease-out; border-radius: 8px; }
 @keyframes flashbg {
-  0%, 30% { background: rgba(79, 140, 255, .22); }
+  0%, 30% { background: rgba(var(--accent-rgb), .22); }
   100% { background: transparent; }
 }
 .panel.narrow { width: 380px; }
@@ -438,7 +440,7 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
   padding: 1px 9px; border-radius: 12px; font-size: 13px;
   background: var(--line); border: 1px solid transparent;
 }
-.reaction.mine { border-color: var(--accent); background: rgba(79, 140, 255, .18); }
+.reaction.mine { border-color: var(--accent); background: rgba(var(--accent-rgb), .18); }
 .reaction-add { opacity: .45; }
 .msg:hover .reaction-add, .reaction-add:focus { opacity: 1; }
 .react-zone { display: inline-flex; align-items: center; gap: 4px; position: relative; }
