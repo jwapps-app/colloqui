@@ -32,8 +32,12 @@ self.addEventListener('push', (event) => {
     // gets banners. This also stops the iOS double-notification: after you tap a
     // banner to open the app, iOS re-delivers the same push to the now-active
     // (and focused) service worker, which would otherwise show it again.
-    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    if (wins.some(w => w.focused)) return;
+    // A test notification always shows (so you can verify display even with the
+    // app focused); real ones are suppressed only when a window is focused.
+    if (!data.test) {
+      const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      if (wins.some(w => w.focused)) return;
+    }
     await self.registration.showNotification(p.title || 'Colloqui', {
       body: p.body || '',
       icon: '/icon-192.png',

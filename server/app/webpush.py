@@ -218,7 +218,7 @@ async def send_test(user_id: uuid.UUID) -> dict:
         {
             "title": "Colloqui test",
             "body": "If you can see this, push notifications work.",
-            "data": {},
+            "data": {"test": True},  # tells the SW to show even if a window is focused
             "badge": 0,
         }
     )
