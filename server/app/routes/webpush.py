@@ -17,6 +17,13 @@ async def vapid_key() -> dict:
     return {"key": webpush.public_key()}
 
 
+@router.post("/test")
+async def test_push(user: User = Depends(get_current_user)) -> dict:
+    """Send a test notification to the caller's own subscriptions and report the
+    per-device delivery outcome — a no-server-access way to diagnose push."""
+    return await webpush.send_test(user.id)
+
+
 @router.post("/subscribe", status_code=204)
 async def subscribe(
     body: PushSubscriptionIn,

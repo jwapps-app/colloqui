@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '96';
+const APP_VERSION = '97';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -3487,6 +3487,27 @@ $('badge-channels-toggle').onchange = async e => {
       body: JSON.stringify({ badge_channel_messages: on }),
     });
   } catch (err) { e.target.checked = !on; appAlert(err.message); }
+};
+$('push-test-btn').onclick = async () => {
+  const out = $('push-test-result');
+  $('push-test-btn').disabled = true;
+  out.textContent = 'Making sure this device is registered…';
+  try {
+    _pushSetupDone = false;          // force a fresh (re)subscribe first
+    await setupPushSubscription();
+    out.textContent = 'Sending test…';
+    const r = await api('/push/test', { method: 'POST' });
+    if (!r.enabled) { out.textContent = 'Web push is not configured on the server.'; return; }
+    if (!r.count) { out.textContent = 'No push subscriptions are registered for your account. (Notification permission may be blocked, or registration failed.)'; return; }
+    const ok = r.results.filter(x => x.ok).length;
+    const detail = r.results.map(x =>
+      `${x.host}: ${x.ok ? 'delivered ✓' : 'FAILED ' + (x.status ?? '') + ' ' + (x.error || '')}`).join('  ·  ');
+    out.textContent = `Sent to ${ok}/${r.count} device(s). ${detail}`;
+  } catch (e) {
+    out.textContent = 'Error: ' + e.message;
+  } finally {
+    $('push-test-btn').disabled = false;
+  }
 };
 $('calendar-copy').onclick = copyCalendarUrl;
 $('calendar-regen').onclick = regenerateCalendarUrl;

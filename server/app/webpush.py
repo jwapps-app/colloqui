@@ -203,3 +203,57 @@ def schedule(
     if not web_push_enabled():
         return
     asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))
+
+
+async def send_test(user_id: uuid.UUID) -> dict:
+    """Diagnostic: synchronously push a test notification to each of the user's
+    subscriptions and report the per-subscription outcome. Unlike _deliver it
+    does NOT prune, so failures (and their status codes) stay visible."""
+    from pywebpush import WebPushException, webpush
+
+    keys = _keys
+    if keys is None:
+        return {"enabled": False, "count": 0, "results": []}
+    payload = json.dumps(
+        {
+            "title": "Colloqui test",
+            "body": "If you can see this, push notifications work.",
+            "data": {},
+            "badge": 0,
+        }
+    )
+    results: list[dict] = []
+    async with SessionLocal() as db:
+        subs = (
+            await db.scalars(
+                select(PushSubscription).where(PushSubscription.user_id == user_id)
+            )
+        ).all()
+        for sub in subs:
+            host = sub.endpoint.split("/")[2] if "://" in sub.endpoint else sub.endpoint[:40]
+            info = {
+                "endpoint": sub.endpoint,
+                "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
+            }
+            try:
+                resp = await asyncio.to_thread(
+                    webpush,
+                    subscription_info=info,
+                    data=payload,
+                    vapid_private_key=keys["vapid"],
+                    vapid_claims={"sub": keys["subject"]},
+                    ttl=60,
+                )
+                results.append(
+                    {"host": host, "ok": True, "status": getattr(resp, "status_code", 0)}
+                )
+            except WebPushException as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                results.append(
+                    {"host": host, "ok": False, "status": status, "error": str(e)[:160]}
+                )
+            except Exception as e:  # noqa: BLE001
+                results.append(
+                    {"host": host, "ok": False, "status": None, "error": str(e)[:160]}
+                )
+    return {"enabled": True, "count": len(results), "results": results}
