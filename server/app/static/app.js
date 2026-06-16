@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '95';
+const APP_VERSION = '96';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2291,12 +2291,32 @@ async function setupPushSubscription() {
   try {
     const { key } = await api('/push/vapid');
     if (!key) return;  // server hasn't configured web push
+    const wantKey = urlBase64ToUint8Array(key);
     const reg = await navigator.serviceWorker.ready;
     let sub = await reg.pushManager.getSubscription();
+    // Self-heal a stale subscription: if it was created with a different VAPID
+    // key (e.g. the server's key changed), the push service rejects every push
+    // to it. Detect the mismatch, drop the old one (server + browser), and make
+    // a fresh subscription bound to the current key.
+    if (sub) {
+      const have = new Uint8Array(sub.options.applicationServerKey || new ArrayBuffer(0));
+      const matches = have.length === wantKey.length && have.every((b, i) => b === wantKey[i]);
+      if (!matches) {
+        const o = sub.toJSON();
+        try {
+          await api('/push/subscribe', {
+            method: 'DELETE',
+            body: JSON.stringify({ endpoint: o.endpoint, keys: o.keys }),
+          });
+        } catch {}
+        await sub.unsubscribe().catch(() => {});
+        sub = null;
+      }
+    }
     if (!sub) {
       sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(key),
+        applicationServerKey: wantKey,
       });
     }
     const j = sub.toJSON();
