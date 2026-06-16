@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '99';
+const APP_VERSION = '100';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -3516,6 +3516,20 @@ $('push-test-btn').onclick = async () => {
     out.textContent = 'Error: ' + e.message;
   } finally {
     $('push-test-btn').disabled = false;
+  }
+};
+$('badge-test-btn').onclick = async () => {
+  const out = $('push-test-result');
+  if (!navigator.setAppBadge) {
+    out.textContent = "This browser doesn't support app-icon badges.";
+    return;
+  }
+  try {
+    await navigator.setAppBadge(7);
+    out.textContent = 'Set the icon badge to 7 — look at the Colloqui dock/taskbar icon now. '
+      + '(It clears when you open the 🔔 list or read messages.)';
+  } catch (e) {
+    out.textContent = 'Badge not available here: ' + ((e && e.message) || e);
   }
 };
 $('calendar-copy').onclick = copyCalendarUrl;
