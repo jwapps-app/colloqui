@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '98';
+const APP_VERSION = '99';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -42,16 +42,25 @@ fetch('/healthz').then(r => r.json()).then(d => {
 
 // Pin the layout height (--vh) to what the web view can actually paint. The
 // `apple-mobile-web-app-status-bar-style: black` meta seats the iOS standalone
-// canvas below the status bar, so window.innerHeight is the true paintable
-// height and fills to the bottom. When the keyboard is open we instead use
-// visualViewport.height (the visible area above it) so the composer rides just
-// above the keyboard; a 120px threshold separates a real keyboard from
-// safe-area jitter.
+// canvas below the status bar, so the full screen is the paintable height.
+//
+// Robustness: iOS standalone sometimes reports a STALE, too-small innerHeight
+// (or visualViewport.height) after a keyboard/background transition, which used
+// to latch a giant gap at the bottom until a force-close. So we take the LARGER
+// of the two readings as the full height, and only shrink below it when the
+// keyboard is genuinely open — which we gate on an input actually being focused
+// (a real keyboard) so a stale small reading alone can't shrink the layout.
 function setViewportHeight() {
   const vv = window.visualViewport;
   const inner = window.innerHeight;
-  const kb = vv ? Math.max(0, inner - vv.height - vv.offsetTop) : 0;
-  const h = (kb > 120 && vv) ? vv.height : inner;
+  const full = vv ? Math.max(inner, vv.height) : inner;
+  let h = full;
+  const ae = document.activeElement;
+  const typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+  if (typing && vv) {
+    const kb = Math.max(0, full - vv.height - vv.offsetTop);
+    if (kb > 120) h = vv.height;  // sit above the on-screen keyboard
+  }
   document.documentElement.style.setProperty('--vh', Math.round(h) + 'px');
 }
 // Whether the message list is pinned to the latest message. Updated on scroll
