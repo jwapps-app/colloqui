@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '100';
+const APP_VERSION = '101';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2096,10 +2096,12 @@ function updateNotifBadge() {
   $('notifs-btn').classList.toggle('active', notifUnread > 0);
   // Mirror onto the installed-app icon badge (iOS 16.4+ / desktop PWAs). The
   // service worker sets it from pushes while closed; this keeps it in sync
-  // while open, so reading notifications clears the home-screen number.
+  // while open, so reading notifications clears the icon number. setAppBadge(0)
+  // is the reliable clear (Safari's clearAppBadge() often doesn't take); call
+  // clearAppBadge too as a belt-and-suspenders.
   if (navigator.setAppBadge) {
-    if (notifUnread > 0) navigator.setAppBadge(notifUnread).catch(() => {});
-    else if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+    navigator.setAppBadge(notifUnread).catch(() => {});
+    if (notifUnread === 0 && navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
   }
 }
 
@@ -2264,11 +2266,14 @@ async function openNotifs() {
     if (perm === 'granted') setupPushSubscription();
   }
   await Promise.all([loadReminders(), loadNotifications()]);
-  if (notifUnread > 0) {
-    try { await api('/notifications/read-all', { method: 'POST' }); } catch {}
-    notifUnread = 0;
-    updateNotifBadge();
-  }
+  // Opening the inbox = "I've seen these": always mark all read and clear the
+  // badge, even if our local counter already reads 0 (a push delivered while
+  // backgrounded can set the app-icon badge without the page's counter knowing,
+  // which otherwise left the dock number stuck until a relaunch). read-all is
+  // idempotent, so calling it unconditionally is harmless.
+  try { await api('/notifications/read-all', { method: 'POST' }); } catch {}
+  notifUnread = 0;
+  updateNotifBadge();
 }
 
 function maybeBrowserNotify(n) {
