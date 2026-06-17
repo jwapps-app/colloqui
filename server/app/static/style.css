@@ -1,10 +1,20 @@
 * { box-sizing: border-box; margin: 0; }
 :root {
-  /* Purple theme echoing the app icon (#6b63e5 gradient, #5852d6 glyphs). */
+  /* Purple theme echoing the app icon (#6b63e5 gradient, #5852d6 glyphs).
+     Dark is the default/fallback; JS sets data-theme="light"|"dark" on <html>
+     (resolving the "system" preference), so light just overrides the vars. */
   --bg: #15131c; --panel: #1e1b29; --line: #2e2b40;
   --text: #e7e6ee; --muted: #918da0;
   --accent: #6b63e5; --accent-rgb: 107, 99, 229; --danger: #e0604f;
+  --hover: rgba(255, 255, 255, .025);  /* subtle row/message hover */
   color-scheme: dark;  /* native date/select/scrollbar controls render dark */
+}
+:root[data-theme="light"] {
+  --bg: #f4f3fa; --panel: #ffffff; --line: #e4e2ee;
+  --text: #1b1a24; --muted: #6b6880;
+  --accent: #5852d6; --accent-rgb: 88, 82, 214; --danger: #d23b2c;
+  --hover: rgba(0, 0, 0, .045);
+  color-scheme: light;
 }
 html { height: 100%; }
 body {
@@ -125,12 +135,19 @@ button:hover { filter: brightness(1.1); }
 #ver { font-size: 10px; color: var(--muted); font-weight: 400; margin-right: 6px; white-space: nowrap; }
 #sidebar-footer { border-top: 1px solid var(--line); }
 #sidebar-top button, #sidebar-footer button { font-size: 12px; padding: 4px 9px; }
+#sidebar-top #threads-btn,
+#sidebar-top #pins-btn,
 #sidebar-top #tasks-btn,
 #sidebar-top #notifs-btn,
 #sidebar-footer #settings-btn { font-size: 16px; line-height: 1; padding: 3px 7px; }
-/* Grayscale until there's something to act on, then full color. */
+/* Grayscale until there's something to act on, then full color. Works in both
+   themes — grayscale + opacity dims the emoji regardless of background. */
+#sidebar-top #threads-btn,
+#sidebar-top #pins-btn,
 #sidebar-top #tasks-btn,
 #sidebar-top #notifs-btn { filter: grayscale(1); opacity: .5; }
+#sidebar-top #threads-btn.active,
+#sidebar-top #pins-btn.active,
 #sidebar-top #tasks-btn.active,
 #sidebar-top #notifs-btn.active { filter: none; opacity: 1; }
 .section { padding: 20px 12px 6px; }
@@ -207,6 +224,15 @@ li.active .task-chip { color: #fff; background: rgba(255, 255, 255, .2); }
   border-radius: 4px; padding: 0 4px; text-transform: uppercase;
 }
 .toggle-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+/* Theme picker: System / Light / Dark segmented control */
+.theme-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; }
+.theme-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.theme-seg button {
+  background: none; border: none; border-left: 1px solid var(--line);
+  padding: 6px 14px; font-size: 13px; color: var(--muted); cursor: pointer;
+}
+.theme-seg button:first-child { border-left: none; }
+.theme-seg button.active { background: var(--accent); color: #fff; }
 
 /* ---------- compact message density ---------- */
 body.compact .msg { margin-bottom: 0; padding: 1px 8px; gap: 8px; }
@@ -477,7 +503,7 @@ input[type="datetime-local"] { color-scheme: dark; }
 /* Hover styles only on real-pointer devices. On touch, a `:hover` rule makes
    the first tap a "hover" and needs a second tap to register the click. */
 @media (hover: hover) {
-  .msg:hover { background: rgba(255, 255, 255, .025); }
+  .msg:hover { background: var(--hover); }
   .msg:hover .actions { visibility: visible; }
 }
 .msg-main { flex: 1; min-width: 0; }

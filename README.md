@@ -1,6 +1,6 @@
 # Colloqui
 
-A fully self-hosted, sovereign team/family chat server — your own Slack, with no
+A fully self-hosted, sovereign team/family chat server. Your own Slack, with no
 third-party services, no phone-home, and no vendor lock-in. FastAPI +
 PostgreSQL + a no-framework web client, shipped as a single Docker image.
 
@@ -8,11 +8,15 @@ Spaces → channels (public/private) → messages, plus DMs and group DMs, threa
 reactions, @mentions, pinned messages, shared task checklists, reminders with an
 iCal feed, file uploads with inline preview, full-text search, per-channel
 notification levels, incoming webhooks, and link previews. Sign in with a
-**passkey** (WebAuthn) or a classic **username + password** — your choice.
+**passkey** (WebAuthn) or a classic **username + password**, your choice.
+
+The client is an installable **PWA**: add it to your home screen on iOS or
+desktop for an app-like window, offline message viewing, and push notifications
+(see Web Push below). There is no separate native app to install or maintain.
 
 Everything runs on hardware you control. The only outbound network call the
 server ever makes is fetching a pasted URL's title for a link preview (and that
-is SSRF-hardened — it refuses private/loopback/cloud-metadata addresses).
+is SSRF-hardened, refusing private/loopback/cloud-metadata addresses).
 
 ## Quick start (self-host)
 
@@ -21,14 +25,14 @@ You need Docker with Compose. Then:
 ```sh
 git clone <this-repo> colloqui && cd colloqui
 cp .env.example .env
-# edit .env — at minimum set POSTGRES_PASSWORD, COLLOQUI_IMAGE, RP_ID, ORIGIN
+# edit .env, at minimum set POSTGRES_PASSWORD, COLLOQUI_IMAGE, RP_ID, ORIGIN
 docker compose -f docker-compose.prod.yml up -d
 ```
 
 Open `http://<host>:3300`. The **first account you register becomes the admin**.
 
-> The database schema is created/upgraded automatically on startup (Alembic) —
-> there's no manual migration step.
+> The database schema is created/upgraded automatically on startup (Alembic),
+> so there's no manual migration step.
 
 On a **Synology NAS**, put the project under `/volume1/docker/colloqui` and set
 `DATA_DIR=/volume1/docker/colloqui/data` in `.env` so the database, uploads, and
@@ -46,38 +50,19 @@ backups all live there.
 | `ORIGIN`           | Exact browser origin, e.g. `https://chat.example.com`                      |
 | `DEV_MODE`         | `true` exposes `/docs` (Swagger). Keep `false` in production.             |
 
-### iOS push (APNs) — optional
-
-Native push for the companion iOS app. All optional; **push is a silent no-op
-until these are set**, so you can ignore them until the app exists. The server
-talks to Apple directly with your own signing key — no third-party push gateway.
-
-| Variable         | What it is                                                              |
-|------------------|------------------------------------------------------------------------|
-| `APNS_KEY_PATH`  | Path to your APNs auth key (`.p8`) mounted into the container, **or**…  |
-| `APNS_KEY`       | …the `.p8` PEM contents inline. Never commit the key.                   |
-| `APNS_KEY_ID`    | The key's Key ID (from the Apple Developer portal)                      |
-| `APNS_TEAM_ID`   | Your Apple Developer Team ID                                            |
-| `APNS_TOPIC`     | The app's bundle id, e.g. `co.jjrrr.colloqui`                           |
-| `APNS_SANDBOX`   | `true` for dev/TestFlight builds; `false` (default) for App Store       |
-
-The iOS app registers its device token via `POST /api/v1/devices`; dead tokens are
-pruned automatically. Per-channel mute is respected before a push is ever sent.
-
 ### Web Push (PWA notifications)
 
 Notifications for the installed web app (Add to Home Screen), including on iOS
-16.4+ and desktop Chrome/Firefox. **This works out of the box — no
+16.4+ and desktop Chrome/Firefox. **This works out of the box, with no
 configuration.** On first boot the server generates a VAPID keypair and persists
 it on the data volume (`uploads/vapid.json`), and `VAPID_SUBJECT` defaults to
 your `ORIGIN`. We sign with our own keys and POST straight to the browser's push
-service — no third-party gateway. (The delivery hop itself necessarily routes
+service, with no third-party gateway. (The delivery hop itself necessarily routes
 through the browser vendor's push service: Apple for iOS/Safari, Google for
-Chrome, Mozilla for Firefox — there is no self-hosted web-push transport. Same
-unavoidable hop as APNs.)
+Chrome, Mozilla for Firefox. There is no self-hosted web-push transport.)
 
 To **manage your own keys** instead (e.g. to share one pair across instances),
-set these env vars — they override the auto-generated pair:
+set these env vars, which override the auto-generated pair:
 
 | Variable             | What it is                                                          |
 |----------------------|--------------------------------------------------------------------|
@@ -100,8 +85,8 @@ print('VAPID_PRIVATE_KEY=' + priv); print('VAPID_PUBLIC_KEY=' + pub)"
 
 The PWA subscribes via `POST /api/v1/push/subscribe` after the user grants
 notification permission; dead subscriptions (404/410) are pruned automatically.
-Notifications fire through the single `notify_user()` seam, so both APNs and Web
-Push go out together.
+Notifications fire through a single `notify_user()` seam, and per-channel mute is
+respected before a push is ever sent.
 
 ### About passkeys vs. passwords and addresses
 
@@ -162,9 +147,9 @@ tar xzf data/backups/uploads-YYYYMMDD-HHMMSS.tar.gz -C data/
 ## Moving an existing instance to a new host
 
 Because all state lives in Postgres + the uploads directory (never in the image),
-moving hosts — e.g. from a laptop to a NAS — carries everything over, **including
-passkeys**, as long as the new host serves the **same domain** (`RP_ID`/`ORIGIN`
-unchanged).
+moving hosts, for example from a laptop to a NAS, carries everything over,
+**including passkeys**, as long as the new host serves the **same domain**
+(`RP_ID`/`ORIGIN` unchanged).
 
 On the **old** host, take a fresh snapshot and copy it over:
 
@@ -186,8 +171,8 @@ docker compose -f docker-compose.prod.yml up -d           # start everything
 
 Then repoint your Cloudflare Tunnel from the old host to the new one. Since the
 domain is unchanged, existing passkeys keep working with no re-enrollment.
-`POSTGRES_PASSWORD` may differ between hosts — the dump doesn't carry it — as
-long as the new host's `db` and `api` agree.
+`POSTGRES_PASSWORD` may differ between hosts (the dump doesn't carry it) as long
+as the new host's `db` and `api` agree.
 
 ## Development
 

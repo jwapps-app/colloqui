@@ -12,7 +12,16 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=81">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=81">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=81">
-<link rel="stylesheet" href="/style.css?v=103">
+<link rel="stylesheet" href="/style.css?v=104">
+<script>
+  // Set the theme before first paint to avoid a flash of the wrong palette.
+  (function () {
+    var p = localStorage.getItem('theme') || 'system';
+    var dark = p === 'dark' ||
+      (p !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
 </head>
 <body>
 
@@ -218,6 +227,15 @@
         <input type="checkbox" id="compact-toggle">
         <span>Compact messages</span>
       </label>
+      <div class="theme-row">
+        <span>Theme</span>
+        <div class="theme-seg" id="theme-seg">
+          <button type="button" data-theme-pref="system">System</button>
+          <button type="button" data-theme-pref="light">Light</button>
+          <button type="button" data-theme-pref="dark">Dark</button>
+        </div>
+      </div>
+      <p class="muted">“System” follows your device’s light/dark setting.</p>
     </section>
     <section>
       <h3>Calendar sync</h3>
@@ -433,6 +451,6 @@
   </div>
 </div>
 
-<script src="/app.js?v=103"></script>
+<script src="/app.js?v=104"></script>
 </body>
 </html>

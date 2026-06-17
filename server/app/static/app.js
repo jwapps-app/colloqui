@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '103';
+const APP_VERSION = '104';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -764,6 +764,14 @@ function renderChannels() {
     section.appendChild(ul);
     container.appendChild(section);
   }
+  updateActionIcons();
+}
+
+// Gray out the pins header icon when nothing is pinned anywhere. (Threads is
+// driven by refreshThreadCount to match its inbox; tasks/notifs toggle their
+// own icons elsewhere.)
+function updateActionIcons() {
+  $('pins-btn').classList.toggle('active', channels.some(c => c.pinned_count > 0));
 }
 
 async function loadChannels() {
@@ -2211,6 +2219,22 @@ function scheduleTaskCount() {
   taskCountTimer = setTimeout(refreshTaskCount, 500);
 }
 
+// Threads icon mirrors the threads inbox: lit only when /threads would return
+// something (threads you're in with activity in the last 7 days), so tapping a
+// lit icon always shows content. (Channel-wide thread_count would light up for
+// threads you're not part of.)
+let threadCountTimer = null;
+async function refreshThreadCount() {
+  try {
+    const threads = await api('/threads');
+    $('threads-btn').classList.toggle('active', threads.length > 0);
+  } catch {}
+}
+function scheduleThreadCount() {
+  clearTimeout(threadCountTimer);
+  threadCountTimer = setTimeout(refreshThreadCount, 500);
+}
+
 async function createReminder(text, due, messageId) {
   await api('/reminders', {
     method: 'POST',
@@ -2745,6 +2769,7 @@ function handleEvent(data) {
         loadChannels();
       }
       scheduleTaskCount();
+      scheduleThreadCount();
       return;
     }
     if (currentChannel && m.channel_id === currentChannel.id) {
@@ -2801,6 +2826,7 @@ function handleEvent(data) {
       renderChannels();
     }
     scheduleTaskCount();
+    scheduleThreadCount();
   } else if (data.type === 'message.reacted') {
     document.querySelectorAll(`.msg[data-id="${data.message_id}"] .reactions`)
       .forEach(row => renderReactions(row, data.message_id, data.reactions));
@@ -2835,6 +2861,29 @@ function applyCompact(on) {
   document.body.classList.toggle('compact', on);
   localStorage.setItem('compact', on ? '1' : '0');
 }
+
+// Theme: 'system' (follow OS), 'light', or 'dark'. The effective light/dark is
+// set on <html data-theme>; CSS overrides the palette vars for light.
+function effectiveTheme(pref) {
+  if (pref === 'light' || pref === 'dark') return pref;
+  return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+function applyTheme(pref) {
+  pref = pref || 'system';
+  localStorage.setItem('theme', pref);
+  const eff = effectiveTheme(pref);
+  document.documentElement.dataset.theme = eff;
+  const tc = document.querySelector('meta[name="theme-color"]');
+  if (tc) tc.setAttribute('content', eff === 'dark' ? '#15131c' : '#f4f3fa');
+  const seg = document.getElementById('theme-seg');
+  if (seg) seg.querySelectorAll('button').forEach(
+    b => b.classList.toggle('active', b.dataset.themePref === pref)
+  );
+}
+// Re-resolve when the OS flips light/dark, but only while following the system.
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if ((localStorage.getItem('theme') || 'system') === 'system') applyTheme('system');
+});
 
 async function openAccount() {
   $('account').classList.remove('hidden');
@@ -3370,6 +3419,7 @@ async function showApp() {
     updateNotifBadge();
   } catch {}
   refreshTaskCount();
+  refreshThreadCount();
   setupPushSubscription();  // if permission was already granted on a prior visit
   maybeOpenDeepLink();      // a push tapped while the app was closed
 }
@@ -3626,6 +3676,10 @@ $('member-add-btn').onclick = addMember;
 $('edit-channel-btn').onclick = editChannel;
 $('profile-save').onclick = saveProfile;
 $('compact-toggle').onchange = e => applyCompact(e.target.checked);
+$('theme-seg').addEventListener('click', e => {
+  const b = e.target.closest('[data-theme-pref]');
+  if (b) applyTheme(b.dataset.themePref);
+});
 $('badge-channels-toggle').onchange = async e => {
   const on = e.target.checked;
   try {
@@ -3686,6 +3740,7 @@ $('attach-btn').onclick = () => $('file-input').click();
 $('file-input').onchange = uploadAttachment;
 
 applyCompact(localStorage.getItem('compact') === '1');
+applyTheme(localStorage.getItem('theme') || 'system');
 
 (async () => {
   if (token) {
