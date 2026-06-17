@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '102';
+const APP_VERSION = '103';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -91,22 +91,42 @@ function pinViewport() {
     keepMessagesPinned();
   }
 }
+// Re-measure repeatedly for ~2s. iOS standalone reports its true height late at
+// startup, and — crucially — reports a STALE, keyboard-sized height for a beat
+// after the app returns to the foreground. Re-arming this poll on every
+// foreground lets the layout self-heal instead of latching a giant bottom gap
+// until a force-close.
+let _vhWarmup = null;
+function rearmViewportWarmup() {
+  let ticks = 0;
+  clearInterval(_vhWarmup);
+  _vhWarmup = setInterval(() => {
+    pinViewport();
+    if (++ticks > 14) { clearInterval(_vhWarmup); _vhWarmup = null; }
+  }, 150);
+}
 pinViewport();
-let _vhTicks = 0;
-const _vhWarmup = setInterval(() => {
-  pinViewport();
-  if (++_vhTicks > 14) clearInterval(_vhWarmup);  // standalone settles late (~2s)
-}, 150);
+rearmViewportWarmup();
 ['resize', 'orientationchange', 'pageshow', 'focus'].forEach(
   e => window.addEventListener(e, pinViewport)
 );
+window.addEventListener('pageshow', rearmViewportWarmup);
 if (window.visualViewport) {
   // The reliable signal for keyboard open/close on iOS.
   window.visualViewport.addEventListener('resize', pinViewport);
   window.visualViewport.addEventListener('scroll', pinViewport);
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) pinViewport();
+  if (document.hidden) {
+    // Drop keyboard focus on the way out: otherwise a stale "an input is still
+    // focused" state on return tricks setViewportHeight into shrinking for a
+    // keyboard that isn't actually on screen — the giant-gap latch.
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) ae.blur();
+  } else {
+    pinViewport();
+    rearmViewportWarmup();
+  }
 });
 // iOS does its scroll-into-view shortly after focus and again as the keyboard
 // animates in, so snap back across that window too.
