@@ -2,7 +2,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -21,6 +21,7 @@ from ..schemas import (
     SpaceMemberIn,
     SpaceMemberOut,
     SpaceMemberRoleIn,
+    SpaceOrderIn,
     SpaceOut,
     UserOut,
 )
@@ -101,7 +102,7 @@ async def my_spaces(
             select(Space, SpaceMember.role)
             .join(SpaceMember, SpaceMember.space_id == Space.id)
             .where(SpaceMember.user_id == user.id)
-            .order_by(Space.is_default.desc(), Space.name)
+            .order_by(Space.position, Space.name)
         )
     ).all()
     spaces = [space_out(s, role) for s, role in rows]
@@ -116,13 +117,28 @@ async def my_spaces(
     return spaces
 
 
+@router.put("/order", status_code=204)
+async def reorder_spaces(
+    body: SpaceOrderIn,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+) -> None:
+    """Set the global top-to-bottom order of spaces (admin only). `order` is the
+    space ids in the desired order; each gets position = its index."""
+    for i, sid in enumerate(body.order):
+        await db.execute(update(Space).where(Space.id == sid).values(position=i))
+
+
 @router.post("", response_model=SpaceOut, status_code=201)
 async def create_space(
     body: SpaceIn,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_admin_user),
 ) -> SpaceOut:
-    space = Space(name=body.name.strip(), created_by=admin.id)
+    max_pos = await db.scalar(select(func.max(Space.position)))
+    space = Space(
+        name=body.name.strip(), created_by=admin.id, position=(max_pos or 0) + 1
+    )
     db.add(space)
     await db.flush()
     db.add(SpaceMember(space_id=space.id, user_id=admin.id, role="manager"))

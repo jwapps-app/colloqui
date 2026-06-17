@@ -75,6 +75,10 @@ class SpaceIn(BaseModel):
     name: str = Field(min_length=1, max_length=50)
 
 
+class SpaceOrderIn(BaseModel):
+    order: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
 class SpaceMemberIn(BaseModel):
     user_id: uuid.UUID
     role: str = Field(default="member", pattern=r"^(member|manager)$")

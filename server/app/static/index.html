@@ -12,7 +12,7 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=81">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=81">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=81">
-<link rel="stylesheet" href="/style.css?v=101">
+<link rel="stylesheet" href="/style.css?v=102">
 </head>
 <body>
 
@@ -274,7 +274,13 @@
   <div class="panel">
     <header>
       <h2>Reminders &amp; notifications</h2>
-      <button id="notifs-close">✕</button>
+      <nav class="pane-switch">
+        <button type="button" data-pane="threads-inbox" title="Threads">🧵</button>
+        <button type="button" data-pane="pins" title="Pinned messages">📌</button>
+        <button type="button" data-pane="tasks" title="Open tasks">✅</button>
+        <button type="button" data-pane="notifs" title="Reminders &amp; notifications" class="active">🔔</button>
+        <button id="notifs-close" class="pane-x" title="Close">✕</button>
+      </nav>
     </header>
     <section>
       <h3>New reminder</h3>
@@ -298,7 +304,13 @@
   <div class="panel">
     <header>
       <h2>Open tasks</h2>
-      <button id="tasks-close">✕</button>
+      <nav class="pane-switch">
+        <button type="button" data-pane="threads-inbox" title="Threads">🧵</button>
+        <button type="button" data-pane="pins" title="Pinned messages">📌</button>
+        <button type="button" data-pane="tasks" title="Open tasks" class="active">✅</button>
+        <button type="button" data-pane="notifs" title="Reminders &amp; notifications">🔔</button>
+        <button id="tasks-close" class="pane-x" title="Close">✕</button>
+      </nav>
     </header>
     <section>
       <ul id="task-list"></ul>
@@ -310,7 +322,13 @@
   <div class="panel">
     <header>
       <h2>Threads</h2>
-      <button id="threads-close">✕</button>
+      <nav class="pane-switch">
+        <button type="button" data-pane="threads-inbox" title="Threads" class="active">🧵</button>
+        <button type="button" data-pane="pins" title="Pinned messages">📌</button>
+        <button type="button" data-pane="tasks" title="Open tasks">✅</button>
+        <button type="button" data-pane="notifs" title="Reminders &amp; notifications">🔔</button>
+        <button id="threads-close" class="pane-x" title="Close">✕</button>
+      </nav>
     </header>
     <section>
       <ul id="threads-list"></ul>
@@ -322,7 +340,13 @@
   <div class="panel">
     <header>
       <h2>Pinned messages</h2>
-      <button id="pins-close">✕</button>
+      <nav class="pane-switch">
+        <button type="button" data-pane="threads-inbox" title="Threads">🧵</button>
+        <button type="button" data-pane="pins" title="Pinned messages" class="active">📌</button>
+        <button type="button" data-pane="tasks" title="Open tasks">✅</button>
+        <button type="button" data-pane="notifs" title="Reminders &amp; notifications">🔔</button>
+        <button id="pins-close" class="pane-x" title="Close">✕</button>
+      </nav>
     </header>
     <section>
       <ul id="pins-list"></ul>
@@ -409,6 +433,6 @@
   </div>
 </div>
 
-<script src="/app.js?v=101"></script>
+<script src="/app.js?v=102"></script>
 </body>
 </html>

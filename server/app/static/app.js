@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '101';
+const APP_VERSION = '102';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -730,13 +730,8 @@ function renderChannels() {
     name.textContent = sp.name;
     h3.appendChild(name);
     const btns = document.createElement('span');
-    if (sp.my_role === 'manager' || me.is_admin) {
-      const mg = document.createElement('button');
-      mg.textContent = '⚙';
-      mg.title = 'Manage space';
-      mg.onclick = () => openSpaceManage(sp);
-      btns.appendChild(mg);
-    }
+    // Space management (rename / add members) lives in Settings → Spaces now,
+    // so the sidebar header only carries the "add channel" action.
     const add = document.createElement('button');
     add.textContent = '+';
     add.title = 'Create or join a channel in this space';
@@ -1568,6 +1563,81 @@ function renderBody(text, messageId, cleared) {
   return body;
 }
 
+let _toastTimer = null;
+function toast(msg) {
+  let el = document.getElementById('toast');
+  if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 1600);
+}
+
+async function copyMessageText(m) {
+  const text = m.content || '';
+  if (!text) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // Fallback for non-secure contexts (e.g. http LAN testing).
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    toast('Copied');
+  } catch { toast('Could not copy'); }
+}
+
+// Mobile message-action popup (the "⋯" menu). Built from the same action
+// descriptors the desktop inline icons use.
+function closeMsgMenu() {
+  const m = document.getElementById('msg-menu');
+  if (m) m.remove();
+  document.removeEventListener('pointerdown', onMsgMenuDown, true);
+  window.removeEventListener('scroll', closeMsgMenu, true);
+  window.removeEventListener('resize', closeMsgMenu, true);
+}
+function onMsgMenuDown(e) {
+  const menu = document.getElementById('msg-menu');
+  if (menu && !menu.contains(e.target)) closeMsgMenu();
+}
+function openMsgMenu(anchor, acts) {
+  closeMsgMenu();
+  const menu = document.createElement('div');
+  menu.id = 'msg-menu';
+  menu.className = 'msg-menu';
+  for (const a of acts) {
+    const item = document.createElement('button');
+    const ic = document.createElement('span');
+    ic.className = 'mm-icon';
+    ic.textContent = a.icon;
+    item.appendChild(ic);
+    item.appendChild(document.createTextNode(a.label));
+    item.onclick = () => { closeMsgMenu(); a.fn(); };
+    menu.appendChild(item);
+  }
+  menu.style.visibility = 'hidden';
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  // Always right-aligned to the message (away from the avatar/thumb side).
+  let left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8));
+  let top = Math.max(8, Math.min(r.top, window.innerHeight - mh - 8));
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+  menu.style.visibility = 'visible';
+  setTimeout(() => {
+    document.addEventListener('pointerdown', onMsgMenuDown, true);
+    window.addEventListener('scroll', closeMsgMenu, true);
+    window.addEventListener('resize', closeMsgMenu, true);
+  }, 0);
+}
+
 function buildMessageNode(m, opts) {
   opts = opts || {};
   const div = document.createElement('div');
@@ -1603,50 +1673,44 @@ function buildMessageNode(m, opts) {
     meta.appendChild(pinTag);
   }
 
-  const actions = document.createElement('span');
-  actions.className = 'actions';
-  const reply = document.createElement('button');
-  reply.textContent = '💬';
-  reply.title = opts.inThread ? 'Reply in this thread' : 'Reply in thread';
-  reply.onclick = () => openThread(m);
-  actions.appendChild(reply);
-  const pin = document.createElement('button');
-  pin.textContent = '📌';
-  pin.title = m.pinned ? 'Unpin' : 'Pin';
-  if (m.pinned) pin.classList.add('active-pin');
-  pin.onclick = () => togglePin(m);
-  actions.appendChild(pin);
-  const remind = document.createElement('button');
-  remind.textContent = '⏰';
-  remind.title = 'Remind me about this message';
-  remind.onclick = () => remindAboutMessage(m);
-  actions.appendChild(remind);
+  // One source of truth for the per-message actions: rendered as inline hover
+  // icons on desktop, and collapsed into a tap-to-open "⋯" menu on mobile (so
+  // they never wrap onto a second row on a narrow screen).
+  const acts = [
+    { icon: '💬', label: opts.inThread ? 'Reply in this thread' : 'Reply in thread', fn: () => openThread(m) },
+  ];
+  if (m.content) acts.push({ icon: '📋', label: 'Copy text', fn: () => copyMessageText(m) });
+  acts.push({ icon: '📌', label: m.pinned ? 'Unpin' : 'Pin', cls: m.pinned ? 'active-pin' : '', fn: () => togglePin(m) });
+  acts.push({ icon: '⏰', label: 'Remind me about this', fn: () => remindAboutMessage(m) });
   if (me && m.sender.id === me.id) {
     if (!/^\[( |x)\] /i.test(m.content)) {
-      const task = document.createElement('button');
-      task.textContent = '☑';
-      task.title = 'Convert to task';
-      task.onclick = () => convertToTask(m);
-      actions.appendChild(task);
+      acts.push({ icon: '☑', label: 'Convert to task', fn: () => convertToTask(m) });
     }
-    const edit = document.createElement('button');
-    edit.textContent = '✎';
-    edit.title = 'Edit';
-    edit.onclick = () => editMessage(m);
-    actions.appendChild(edit);
-    const del = document.createElement('button');
-    del.textContent = '🗑';
-    del.title = 'Delete';
-    del.onclick = () => deleteMessage(m);
-    actions.appendChild(del);
+    acts.push({ icon: '✎', label: 'Edit', fn: () => editMessage(m) });
+    acts.push({ icon: '🗑', label: 'Delete', fn: () => deleteMessage(m) });
   } else if (m.sender.username === 'webhook' && currentChannel && canManage(currentChannel)) {
-    const del = document.createElement('button');
-    del.textContent = '🗑';
-    del.title = 'Delete (channel owner)';
-    del.onclick = () => deleteMessage(m);
-    actions.appendChild(del);
+    acts.push({ icon: '🗑', label: 'Delete', fn: () => deleteMessage(m) });
+  }
+  const actions = document.createElement('span');
+  actions.className = 'actions';
+  for (const a of acts) {
+    const b = document.createElement('button');
+    b.textContent = a.icon;
+    b.title = a.label;
+    if (a.cls) b.classList.add(a.cls);
+    b.onclick = a.fn;
+    actions.appendChild(b);
   }
   meta.appendChild(actions);
+
+  // Mobile: a tap anywhere on the message (except interactive bits — links,
+  // images, reactions, reply/thread jumps, buttons) opens the action menu at the
+  // tap point. (Desktop keeps the inline hover icons above.)
+  div.addEventListener('click', (e) => {
+    if (!isNarrow()) return;
+    if (e.target.closest('a, button, input, label, img, .reply-preview, .thread-summary')) return;
+    openMsgMenu(div, acts);
+  });
   main.appendChild(meta);
 
   if (m.reply_to) {
@@ -3175,19 +3239,46 @@ async function saveSpaceName() {
     await api(`/spaces/${manageSpaceId}`, { method: 'PATCH', body: JSON.stringify({ name }) });
     $('space').classList.add('hidden');
     await loadChannels();
+    // If we came from Settings → Spaces, refresh that list too.
+    if (!$('settings').classList.contains('hidden')) await loadAdminSpaces();
+  } catch (e) { appAlert(e.message); }
+}
+
+async function reorderSpace(ids, i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= ids.length) return;
+  const arr = ids.slice();
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  try {
+    await api('/spaces/order', { method: 'PUT', body: JSON.stringify({ order: arr }) });
+    await Promise.all([loadAdminSpaces(), loadChannels()]);
   } catch (e) { appAlert(e.message); }
 }
 
 async function loadAdminSpaces() {
   const list = $('admin-space-list');
   const all = await api('/spaces');
+  const ids = all.map(s => s.id);
   list.innerHTML = '';
-  for (const sp of all) {
+  all.forEach((sp, idx) => {
     const li = document.createElement('li');
     const grow = document.createElement('span');
     grow.className = 'grow';
     grow.textContent = sp.name + (sp.is_default ? ' (default)' : '');
     li.appendChild(grow);
+    const up = document.createElement('button');
+    up.textContent = '↑'; up.title = 'Move up'; up.disabled = idx === 0;
+    up.onclick = () => reorderSpace(ids, idx, -1);
+    li.appendChild(up);
+    const down = document.createElement('button');
+    down.textContent = '↓'; down.title = 'Move down'; down.disabled = idx === all.length - 1;
+    down.onclick = () => reorderSpace(ids, idx, +1);
+    li.appendChild(down);
+    const manage = document.createElement('button');
+    manage.textContent = 'Manage';
+    manage.title = 'Rename this space or add members';
+    manage.onclick = () => openSpaceManage(sp);
+    li.appendChild(manage);
     if (!sp.is_default) {
       const del = document.createElement('button');
       del.textContent = 'Delete';
@@ -3205,7 +3296,7 @@ async function loadAdminSpaces() {
       li.appendChild(del);
     }
     list.appendChild(li);
-  }
+  });
 }
 
 async function newSpace() {
@@ -3412,6 +3503,28 @@ $('pins-close').onclick = () => $('pins').classList.add('hidden');
 $('tasks').onclick = e => { if (e.target === $('tasks')) $('tasks').classList.add('hidden'); };
 $('threads-inbox').onclick = e => { if (e.target === $('threads-inbox')) $('threads-inbox').classList.add('hidden'); };
 $('pins').onclick = e => { if (e.target === $('pins')) $('pins').classList.add('hidden'); };
+
+// Switcher row in each list-pane header: hop straight to another list without
+// closing first. Hide all four panes, then open the target (its opener loads it).
+const PANE_OPENERS = {
+  'threads-inbox': openThreadsInbox,
+  'pins': openPins,
+  'tasks': openTasks,
+  'notifs': openNotifs,
+};
+function closeAllListPanes() {
+  for (const id of ['notifs', 'tasks', 'threads-inbox', 'pins']) $(id).classList.add('hidden');
+}
+document.querySelectorAll('.pane-switch').forEach(nav => {
+  nav.addEventListener('click', e => {
+    const btn = e.target.closest('[data-pane]');
+    if (!btn) return;
+    const open = PANE_OPENERS[btn.dataset.pane];
+    if (!open) return;
+    closeAllListPanes();
+    open();
+  });
+});
 $('rem-add').onclick = addReminderFromPanel;
 $('rem-text').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); addReminderFromPanel(); }

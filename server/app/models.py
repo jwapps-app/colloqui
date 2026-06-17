@@ -143,6 +143,8 @@ class Space(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(50))
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Manual sort order in the sidebar (lower = higher up); rearrangeable by admins.
+    position: Mapped[int] = mapped_column(Integer, default=0)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

@@ -98,7 +98,7 @@ select:focus { border-color: var(--accent); }
 .mention-item.active, .mention-item:hover { background: var(--accent); color: #fff; }
 .mention-item.active .uname, .mention-item:hover .uname { color: rgba(255, 255, 255, .8); }
 #toolbar { display: flex; gap: 4px; margin-bottom: 6px; }
-#toolbar button { padding: 2px 11px; font-size: 13px; }
+#toolbar button { padding: 6px 14px; font-size: 16px; }
 #toolbar button.active { border-color: var(--accent); color: var(--accent); }
 #toolbar button:disabled { opacity: .4; cursor: default; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
@@ -294,9 +294,14 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
   main, #messages { overflow-x: hidden; max-width: 100%; }
   #send-form { max-width: 100%; }
 
-  /* no hover on touch — keep message actions visible */
-  .msg .actions { visibility: visible; }
-  .msg .actions button, .section h3 button { padding: 3px 10px; }
+  /* Bigger formatting buttons, spread evenly across the composer width */
+  #toolbar { gap: 6px; }
+  #toolbar button { flex: 1; padding: 4px 0; font-size: 16px; min-width: 0; }
+
+  /* No hover on touch: hide the inline action icons entirely. Tapping a message
+     opens the action menu at the tap point instead (see openMsgMenu). */
+  .msg .actions { display: none; }
+  .section h3 button { padding: 3px 10px; }
 
   .center { padding: 16px; }
   .card { width: 100%; padding: 24px; }
@@ -468,8 +473,13 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
 .quick-grid button { padding: 10px 8px; }
 input[type="datetime-local"] { color-scheme: dark; }
 #messages { flex: 1; overflow-y: auto; padding: 16px 20px; }
-.msg { margin-bottom: 2px; display: flex; gap: 10px; padding: 4px 8px; border-radius: 8px; }
-.msg:hover { background: rgba(255, 255, 255, .025); }
+.msg { position: relative; margin-bottom: 2px; display: flex; gap: 10px; padding: 4px 8px; border-radius: 8px; }
+/* Hover styles only on real-pointer devices. On touch, a `:hover` rule makes
+   the first tap a "hover" and needs a second tap to register the click. */
+@media (hover: hover) {
+  .msg:hover { background: rgba(255, 255, 255, .025); }
+  .msg:hover .actions { visibility: visible; }
+}
 .msg-main { flex: 1; min-width: 0; }
 .avatar {
   width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
@@ -522,8 +532,33 @@ input[type="datetime-local"] { color-scheme: dark; }
 .pin-tag { margin-left: 6px; font-size: 11px; }
 .msg .actions button.active-pin { opacity: 1; }
 .msg .actions { visibility: hidden; margin-left: 8px; }
-.msg:hover .actions { visibility: visible; }
 .msg .actions button { font-size: 11px; padding: 1px 7px; margin-left: 4px; }
+/* The mobile "⋯" action menu */
+.msg-menu {
+  position: fixed; z-index: 1000;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 4px; min-width: 190px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  display: flex; flex-direction: column;
+}
+.msg-menu button {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  text-align: left; background: none; border: none; color: var(--text);
+  font-size: 15px; padding: 11px 12px; border-radius: 7px;
+}
+.msg-menu button:hover, .msg-menu button:active { background: var(--line); }
+.msg-menu .mm-icon { width: 1.3em; text-align: center; flex-shrink: 0; }
+/* Brief confirmation toast (e.g. "Copied") */
+#toast {
+  position: fixed; left: 50%; bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%) translateY(8px);
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 8px 16px; font-size: 14px; z-index: 2000;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+  opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .attachment-img {
   display: block; max-width: 360px; max-height: 280px;
   border-radius: 8px; margin-top: 6px;
@@ -545,6 +580,22 @@ input[type="datetime-local"] { color-scheme: dark; }
   display: flex; justify-content: space-between; align-items: center;
 }
 .panel h2 { font-size: 17px; }
+/* Switcher row in the list-pane headers (threads / pins / tasks / reminders):
+   tap another icon to jump straight there. Active list is highlighted. */
+.pane-switch { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.pane-switch button {
+  background: none; border: none; font-size: 18px; line-height: 1;
+  padding: 6px 8px; border-radius: 8px; cursor: pointer; opacity: .45;
+}
+.pane-switch button:hover { opacity: 1; background: var(--line); }
+.pane-switch button.active { opacity: 1; background: var(--line); cursor: default; }
+.pane-switch .pane-x { font-size: 16px; opacity: .7; margin-left: 8px; }
+.pane-switch .pane-x:hover { opacity: 1; background: none; }
+/* Let the title shrink/ellipsis so the switcher always fits the width. */
+.overlay.page > .panel > header h2 {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; margin-right: 10px;
+}
 .panel section { margin-top: 18px; }
 .panel section h3 {
   font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
