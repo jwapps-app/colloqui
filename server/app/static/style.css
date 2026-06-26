@@ -563,6 +563,9 @@ input[type="datetime-local"] { color-scheme: dark; }
 .msg .actions button.active-pin { opacity: 1; }
 .msg .actions { visibility: hidden; margin-left: 8px; }
 .msg .actions button { font-size: 11px; padding: 1px 7px; margin-left: 4px; }
+/* Touch devices (incl. iPad PWA, which is wider than the mobile breakpoint)
+   have no hover to reveal these, so hide them and use the tap menu instead. */
+@media (hover: none) { .msg .actions { display: none; } }
 /* The mobile "⋯" action menu */
 .msg-menu {
   position: fixed; z-index: 1000;

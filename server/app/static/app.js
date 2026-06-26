@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '105';
+const APP_VERSION = '106';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -1748,11 +1748,12 @@ function buildMessageNode(m, opts) {
   }
   meta.appendChild(actions);
 
-  // Mobile: a tap anywhere on the message (except interactive bits — links,
-  // images, reactions, reply/thread jumps, buttons) opens the action menu at the
-  // tap point. (Desktop keeps the inline hover icons above.)
+  // Touch/narrow clients open the action menu by tapping the message (except on
+  // interactive bits: links, images, reactions, reply/thread jumps, buttons).
+  // Only true wide hover-capable desktops skip it and use the inline hover icons
+  // instead; an iPad PWA is wide but has no hover, so it gets the menu too.
   div.addEventListener('click', (e) => {
-    if (!isNarrow()) return;
+    if (!isNarrow() && matchMedia('(hover: hover)').matches) return;
     if (e.target.closest('a, button, input, label, img, .reply-preview, .thread-summary')) return;
     openMsgMenu(div, acts);
   });
