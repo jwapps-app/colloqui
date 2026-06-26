@@ -10,8 +10,11 @@ from ..config import settings
 from ..db import get_db
 from ..deps import get_admin_user
 from ..models import (
+    API_KEY_PREFIX,
+    ApiKey,
     Channel,
     ChannelMember,
+    EventSubscription,
     File,
     Invite,
     PasswordCredential,
@@ -27,11 +30,17 @@ from ..schemas import (
     AdminUserCreatedOut,
     AdminUserOut,
     AdminUserUpdateIn,
+    ApiKeyCreatedOut,
+    ApiKeyIn,
+    ApiKeyOut,
+    EventSubCreatedOut,
+    EventSubIn,
+    EventSubOut,
     InviteCreatedOut,
     InviteIn,
     InviteOut,
 )
-from ..security import hash_token, new_invite_code
+from ..security import hash_token, new_invite_code, new_token
 from ..ws import manager
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -235,3 +244,104 @@ async def revoke_invite(
     if invite.used_by is not None:
         raise HTTPException(400, "Invite already used")
     await db.delete(invite)
+
+
+# ---- Integration: API keys (machine-to-machine auth) ----
+
+
+@router.post("/api-keys", response_model=ApiKeyCreatedOut, status_code=201)
+async def create_api_key(
+    body: ApiKeyIn,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+) -> ApiKeyCreatedOut:
+    user = await db.scalar(select(User).where(User.username == body.username.lower()))
+    if user is None:
+        raise HTTPException(404, "No such user to bind the key to")
+    token = API_KEY_PREFIX + new_token()
+    key = ApiKey(name=body.name.strip(), user_id=user.id, token_hash=hash_token(token))
+    db.add(key)
+    await db.flush()
+    return ApiKeyCreatedOut(
+        id=key.id,
+        name=key.name,
+        user_id=key.user_id,
+        created_at=key.created_at,
+        last_used_at=None,
+        key=token,
+    )
+
+
+@router.get("/api-keys", response_model=list[ApiKeyOut])
+async def list_api_keys(
+    db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
+) -> list[ApiKey]:
+    rows = await db.scalars(
+        select(ApiKey).where(ApiKey.revoked_at.is_(None)).order_by(ApiKey.created_at)
+    )
+    return list(rows)
+
+
+@router.delete("/api-keys/{key_id}", status_code=204)
+async def revoke_api_key(
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+) -> None:
+    key = await db.get(ApiKey, key_id)
+    if key is None or key.revoked_at is not None:
+        raise HTTPException(404, "API key not found")
+    key.revoked_at = utcnow()
+
+
+# ---- Integration: outgoing event subscriptions (webhooks out) ----
+
+
+def _sub_out(sub: EventSubscription) -> EventSubOut:
+    return EventSubOut(
+        id=sub.id,
+        url=sub.url,
+        events=sub.events.split(",") if sub.events else None,
+        active=sub.active,
+        created_at=sub.created_at,
+    )
+
+
+@router.post("/event-subscriptions", response_model=EventSubCreatedOut, status_code=201)
+async def create_event_subscription(
+    body: EventSubIn,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+) -> EventSubCreatedOut:
+    secret = "whsec_" + new_token()
+    sub = EventSubscription(
+        url=body.url.strip(),
+        secret=secret,
+        events=",".join(body.events) if body.events else None,
+    )
+    db.add(sub)
+    await db.flush()
+    base = _sub_out(sub)
+    return EventSubCreatedOut(**base.model_dump(), secret=secret)
+
+
+@router.get("/event-subscriptions", response_model=list[EventSubOut])
+async def list_event_subscriptions(
+    db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
+) -> list[EventSubOut]:
+    rows = await db.scalars(
+        select(EventSubscription).order_by(EventSubscription.created_at)
+    )
+    return [_sub_out(s) for s in rows]
+
+
+@router.delete("/event-subscriptions/{sub_id}", status_code=204)
+async def delete_event_subscription(
+    sub_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+) -> None:
+    sub = await db.get(EventSubscription, sub_id)
+    if sub is None:
+        raise HTTPException(404, "Subscription not found")
+    await db.delete(sub)

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
+from .models import API_KEY_PREFIX, ApiKey
 from .models import Session as AuthSession
 from .models import User
 from .security import RateLimiter, hash_token
@@ -31,10 +32,23 @@ def rate_limit_auth(request: Request) -> None:
 async def user_from_token(db: AsyncSession, token: str | None) -> User | None:
     if not token:
         return None
+    now = datetime.now(timezone.utc)
+    # API keys (machine-to-machine) act as their bound user. Long-lived, but
+    # revocable; only the hash is stored, same as session tokens.
+    if token.startswith(API_KEY_PREFIX):
+        key = await db.scalar(
+            select(ApiKey).where(ApiKey.token_hash == hash_token(token))
+        )
+        if key is None or key.revoked_at is not None:
+            return None
+        user = await db.get(User, key.user_id)
+        if user is None or user.disabled:
+            return None
+        key.last_used_at = now
+        return user
     session = await db.scalar(
         select(AuthSession).where(AuthSession.token_hash == hash_token(token))
     )
-    now = datetime.now(timezone.utc)
     if session is None or session.revoked or session.expires_at < now:
         return None
     user = await db.get(User, session.user_id)

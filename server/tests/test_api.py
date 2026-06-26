@@ -1008,3 +1008,62 @@ async def test_read_channel_notifications(client, make_user):
     r2 = (await client.post(f"/api/v1/notifications/read-channel/{chans[0]['id']}",
           headers=auth(b_tok))).json()
     assert r2["cleared"] == 0
+
+
+async def test_api_key_auth_and_revoke(client, make_user):
+    admin_tok, _ = await make_user("kadmin", is_admin=True)
+    await make_user("crmsvc")  # the service user the key acts as
+    r = await client.post(
+        "/api/v1/admin/api-keys",
+        headers=auth(admin_tok),
+        json={"name": "crm", "username": "crmsvc"},
+    )
+    assert r.status_code == 201
+    key = r.json()["key"]
+    key_id = r.json()["id"]
+    assert key.startswith("colq_")
+    # The key authenticates (acts as the bound user).
+    assert (await client.get("/api/v1/spaces", headers=auth(key))).status_code == 200
+    # Listing keys never leaks the token.
+    listed = (await client.get("/api/v1/admin/api-keys", headers=auth(admin_tok))).json()
+    assert any(k["id"] == key_id for k in listed)
+    assert all("key" not in k for k in listed)
+    # Revoked keys stop working.
+    assert (
+        await client.delete(f"/api/v1/admin/api-keys/{key_id}", headers=auth(admin_tok))
+    ).status_code == 204
+    assert (await client.get("/api/v1/spaces", headers=auth(key))).status_code == 401
+
+
+async def test_api_key_admin_only(client, make_user):
+    user_tok, _ = await make_user("plainuser")
+    await make_user("svc2")
+    r = await client.post(
+        "/api/v1/admin/api-keys",
+        headers=auth(user_tok),
+        json={"name": "x", "username": "svc2"},
+    )
+    assert r.status_code == 403
+
+
+async def test_event_subscription_crud(client, make_user):
+    admin_tok, _ = await make_user("eadmin", is_admin=True)
+    r = await client.post(
+        "/api/v1/admin/event-subscriptions",
+        headers=auth(admin_tok),
+        json={"url": "https://example.test/hook", "events": ["message.created"]},
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["secret"].startswith("whsec_")
+    sub_id = body["id"]
+    listed = (
+        await client.get("/api/v1/admin/event-subscriptions", headers=auth(admin_tok))
+    ).json()
+    assert any(s["id"] == sub_id for s in listed)
+    assert all("secret" not in s for s in listed)  # secret shown only at creation
+    assert (
+        await client.delete(
+            f"/api/v1/admin/event-subscriptions/{sub_id}", headers=auth(admin_tok)
+        )
+    ).status_code == 204

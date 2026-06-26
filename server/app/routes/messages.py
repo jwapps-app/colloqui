@@ -47,6 +47,7 @@ from ..schemas import (
     UserOut,
 )
 from ..security import hash_token
+from ..webhooks_out import dispatch_event
 
 log = logging.getLogger("messages")
 from ..ws import manager
@@ -898,6 +899,7 @@ async def send_message(
     await broadcast(
         db, channel_id, {"type": "message.created", "message": jsonable_encoder(out)}
     )
+    dispatch_event("message.created", jsonable_encoder(out))
     schedule_previews(message.id, channel_id, content)
     if thread_root_id is not None:
         await _broadcast_thread_meta(db, channel_id, thread_root_id)
@@ -979,6 +981,7 @@ async def toggle_checkbox(
         message.channel_id,
         {"type": "message.updated", "message": jsonable_encoder(out)},
     )
+    dispatch_event("message.updated", jsonable_encoder(out))
     return out
 
 
@@ -1167,6 +1170,10 @@ async def delete_message(
                 else None,
             },
         },
+    )
+    dispatch_event(
+        "message.deleted",
+        {"id": str(message.id), "channel_id": str(message.channel_id)},
     )
     if message.thread_root_id is not None:
         await db.flush()

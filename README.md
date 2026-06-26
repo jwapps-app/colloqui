@@ -174,6 +174,13 @@ domain is unchanged, existing passkeys keep working with no re-enrollment.
 `POSTGRES_PASSWORD` may differ between hosts (the dump doesn't carry it) as long
 as the new host's `db` and `api` agree.
 
+## Integrating with other apps
+
+Colloqui can act as the chat backbone for another self-hosted service (for
+example a CRM): API keys for machine-to-machine access, incoming webhooks to post
+into channels, outgoing webhooks plus a `/sync` feed to react to chat events, and
+channel deep links. The full contract is in [INTEGRATION.md](INTEGRATION.md).
+
 ## Development
 
 Run the stack from source (builds locally instead of pulling):

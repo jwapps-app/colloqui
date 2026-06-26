@@ -356,6 +356,45 @@ class AdminChannelOut(BaseModel):
     member_count: int
 
 
+# ---- Integration: API keys + outgoing event subscriptions (admin only) ----
+
+
+class ApiKeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    username: str = Field(max_length=32)  # the service user the key acts as
+
+
+class ApiKeyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    user_id: uuid.UUID
+    created_at: datetime
+    last_used_at: datetime | None = None
+
+
+class ApiKeyCreatedOut(ApiKeyOut):
+    key: str  # plaintext, shown exactly once
+
+
+class EventSubIn(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+    events: list[str] | None = Field(default=None, max_length=20)
+
+
+class EventSubOut(BaseModel):
+    id: uuid.UUID
+    url: str
+    events: list[str] | None = None
+    active: bool
+    created_at: datetime
+
+
+class EventSubCreatedOut(EventSubOut):
+    secret: str  # plaintext, shown exactly once
+
+
 class ReminderIn(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     due_at: datetime
