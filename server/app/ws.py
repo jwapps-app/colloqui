@@ -9,48 +9,66 @@ from sqlalchemy import select
 
 from .db import SessionLocal
 from .deps import user_from_token
-from .models import ChannelMember
+from .models import ChannelMember, User, utcnow
 
 router = APIRouter()
 
 
 class ConnectionManager:
-    """Tracks live sockets per user; events fan out to channel members."""
+    """Tracks live sockets per user with an active/away state; events fan out to
+    channel members. A user's effective presence is `online` if any of their
+    sockets is active, `away` if all are idle/backgrounded, else `offline`."""
 
     def __init__(self) -> None:
-        self._sockets: dict[uuid.UUID, set[WebSocket]] = {}
+        # user_id -> {socket: 'active' | 'away'}
+        self._conns: dict[uuid.UUID, dict[WebSocket, str]] = {}
 
     def add(self, user_id: uuid.UUID, ws: WebSocket) -> None:
-        self._sockets.setdefault(user_id, set()).add(ws)
+        self._conns.setdefault(user_id, {})[ws] = "active"
 
     def remove(self, user_id: uuid.UUID, ws: WebSocket) -> None:
-        conns = self._sockets.get(user_id)
+        conns = self._conns.get(user_id)
         if conns is None:
             return
-        conns.discard(ws)
+        conns.pop(ws, None)
         if not conns:
-            del self._sockets[user_id]
+            del self._conns[user_id]
+
+    def set_state(self, user_id: uuid.UUID, ws: WebSocket, state: str) -> None:
+        conns = self._conns.get(user_id)
+        if conns is not None and ws in conns:
+            conns[ws] = "away" if state == "away" else "active"
+
+    def presence_of(self, user_id: uuid.UUID) -> str:
+        conns = self._conns.get(user_id)
+        if not conns:
+            return "offline"
+        return "online" if any(s == "active" for s in conns.values()) else "away"
+
+    def presence_map(self) -> dict[str, str]:
+        """Snapshot of everyone currently connected, as id -> online|away."""
+        return {str(uid): self.presence_of(uid) for uid in self._conns}
 
     async def send_to_users(self, user_ids: Iterable[uuid.UUID], payload: Any) -> None:
         for user_id in set(user_ids):
-            for ws in list(self._sockets.get(user_id, ())):
+            for ws in list(self._conns.get(user_id, {})):
                 try:
                     await ws.send_json(payload)
                 except Exception:
                     pass  # dead socket; the disconnect handler cleans it up
 
     def is_online(self, user_id: uuid.UUID) -> bool:
-        return user_id in self._sockets
+        return user_id in self._conns
 
     def online_user_ids(self) -> list[uuid.UUID]:
-        return list(self._sockets.keys())
+        return list(self._conns.keys())
 
     async def broadcast(self, payload: Any) -> None:
         await self.send_to_users(self.online_user_ids(), payload)
 
     async def disconnect_user(self, user_id: uuid.UUID) -> None:
         """Force-close every socket a user holds (e.g. account disabled)."""
-        for ws in list(self._sockets.get(user_id, ())):
+        for ws in list(self._conns.get(user_id, {})):
             try:
                 await ws.close(code=4403)
             except Exception:
@@ -78,14 +96,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    came_online = not manager.is_online(user.id)
+    before = manager.presence_of(user.id)
     manager.add(user.id, ws)
-    await ws.send_json(
-        {"type": "ready", "online": [str(u) for u in manager.online_user_ids()]}
-    )
-    if came_online:
+    await ws.send_json({"type": "ready", "presence": manager.presence_map()})
+    after = manager.presence_of(user.id)
+    if after != before:
         await manager.broadcast(
-            {"type": "presence", "user_id": str(user.id), "online": True}
+            {"type": "presence", "user_id": str(user.id), "state": after}
         )
     last_typing = 0.0
     try:
@@ -95,6 +112,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 continue
             if data.get("type") == "ping":
                 await ws.send_json({"type": "pong"})
+            elif data.get("type") == "presence":
+                # Client reports this socket as active or away (tab focus/idle).
+                before = manager.presence_of(user.id)
+                manager.set_state(user.id, ws, str(data.get("state")))
+                after = manager.presence_of(user.id)
+                if after != before:
+                    await manager.broadcast(
+                        {"type": "presence", "user_id": str(user.id), "state": after}
+                    )
             elif data.get("type") == "typing":
                 now = time.monotonic()
                 if now - last_typing < 1.0:  # throttle typing fan-out
@@ -129,8 +155,17 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        before = manager.presence_of(user.id)
         manager.remove(user.id, ws)
-        if not manager.is_online(user.id):
+        after = manager.presence_of(user.id)
+        if after != before:
+            if after == "offline":
+                # Their last socket dropped: stamp "last seen" for the UI.
+                async with SessionLocal() as db:
+                    u = await db.get(User, user.id)
+                    if u is not None:
+                        u.last_seen_at = utcnow()
+                        await db.commit()
             await manager.broadcast(
-                {"type": "presence", "user_id": str(user.id), "online": False}
+                {"type": "presence", "user_id": str(user.id), "state": after}
             )

@@ -14,6 +14,8 @@ class UserOut(BaseModel):
     display_name: str
     is_admin: bool
     avatar_at: datetime | None = None
+    status: str | None = None
+    last_seen_at: datetime | None = None
 
 
 class MeOut(UserOut):
@@ -62,6 +64,7 @@ class TokenOut(BaseModel):
 class UpdateMeIn(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=64)
     badge_channel_messages: bool | None = None
+    status: str | None = Field(default=None, max_length=80)
 
 
 class SpaceOut(BaseModel):

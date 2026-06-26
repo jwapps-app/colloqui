@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '104';
+const APP_VERSION = '105';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -179,7 +179,11 @@ let editingMessageId = null;
 let replyingTo = null;  // { id, sender_name, snippet }
 let threadRootId = null;  // id of the thread currently open in the thread pane
 let sock = null;
-const onlineUsers = new Set();
+const presence = new Map();  // user_id -> 'online' | 'away' | 'offline'
+function presenceOf(userId) { return presence.get(userId) || 'offline'; }
+function lastSeenText(user) {
+  return user && user.last_seen_at ? 'last seen ' + relTime(user.last_seen_at) : 'offline';
+}
 const imageUrls = new Map();
 const typers = new Map();   // user_id -> {name, timer}
 let lastTypingSent = 0;
@@ -392,7 +396,7 @@ function onSignedIn(result) {
 function signOutLocal() {
   token = null; me = null; currentChannel = null; spaces = [];
   localStorage.removeItem('token');
-  onlineUsers.clear(); typers.clear();
+  presence.clear(); typers.clear();
   notifUnread = 0;
   if (sock) { sock.close(); sock = null; }
   resolveDialog(false);
@@ -660,7 +664,9 @@ function channelLi(ch) {
   if (muted) li.classList.add('muted');
   if (ch.is_dm && ch.dm_user) {
     const dot = document.createElement('span');
-    dot.className = 'dot' + (onlineUsers.has(ch.dm_user.id) ? ' online' : '');
+    const st = presenceOf(ch.dm_user.id);
+    dot.className = 'dot ' + st;
+    dot.title = ch.dm_user.status || (st === 'offline' ? lastSeenText(ch.dm_user) : st);
     li.appendChild(dot);
   }
   const label = document.createElement('span');
@@ -960,6 +966,11 @@ async function loadMembers() {
   list.innerHTML = '';
   for (const m of members) {
     const li = document.createElement('li');
+    const dot = document.createElement('span');
+    dot.className = 'dot ' + presenceOf(m.id);
+    dot.dataset.uid = m.id;
+    dot.title = presenceOf(m.id) === 'offline' ? lastSeenText(m) : presenceOf(m.id);
+    li.appendChild(dot);
     const grow = document.createElement('span');
     grow.className = 'grow';
     grow.textContent = m.display_name;
@@ -967,6 +978,12 @@ async function loadMembers() {
     sub.className = 'sub';
     sub.textContent = '@' + m.username + (m.is_admin ? ' · server admin' : '');
     grow.appendChild(sub);
+    if (m.status) {
+      const st = document.createElement('div');
+      st.className = 'sub status-line';
+      st.textContent = m.status;
+      grow.appendChild(st);
+    }
     li.appendChild(grow);
     if (canManage(currentChannel) && m.id !== me.id) {
       const btn = document.createElement('button');
@@ -2719,13 +2736,16 @@ function maybeSendTyping() {
 
 function handleEvent(data) {
   if (data.type === 'ready') {
-    onlineUsers.clear();
-    (data.online || []).forEach(id => onlineUsers.add(id));
-    renderChannels();
+    presence.clear();
+    for (const [id, state] of Object.entries(data.presence || {})) presence.set(id, state);
+    onPresenceChanged();
+    // Sync this client's state to the fresh socket (server assumes active).
+    myPresence = 'active';
+    if (document.hidden) sendPresence('away'); else armIdle();
   } else if (data.type === 'presence') {
-    if (data.online) onlineUsers.add(data.user_id);
-    else onlineUsers.delete(data.user_id);
-    renderChannels();
+    if (data.state && data.state !== 'offline') presence.set(data.user_id, data.state);
+    else presence.delete(data.user_id);
+    onPresenceChanged();
   } else if (data.type === 'typing') {
     onTypingEvent(data);
   } else if (data.type === 'notification') {
@@ -2846,6 +2866,37 @@ function handleEvent(data) {
   }
 }
 
+// ---------- presence (away on idle / backgrounded) ----------
+// Re-render presence dots wherever they appear. DM dots are rebuilt by
+// renderChannels; member-list and footer dots carry data-uid and update here.
+function onPresenceChanged() {
+  renderChannels();
+  document.querySelectorAll('.dot[data-uid]').forEach(d => {
+    d.className = 'dot ' + presenceOf(d.dataset.uid);
+  });
+}
+let myPresence = 'active';
+let idleTimer = null;
+const IDLE_MS = 5 * 60 * 1000;
+function sendPresence(state) {
+  if (state === myPresence) return;
+  myPresence = state;
+  if (sock && sock.readyState === WebSocket.OPEN) {
+    sock.send(JSON.stringify({ type: 'presence', state }));
+  }
+}
+function armIdle() {
+  sendPresence('active');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => sendPresence('away'), IDLE_MS);
+}
+['mousemove', 'keydown', 'touchstart', 'pointerdown'].forEach(
+  e => window.addEventListener(e, armIdle, { passive: true })
+);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) sendPresence('away'); else armIdle();
+});
+
 function connectWs() {
   if (sock) sock.close();
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2888,6 +2939,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
 async function openAccount() {
   $('account').classList.remove('hidden');
   $('profile-display').value = me.display_name;
+  $('profile-status').value = me.status || '';
   $('badge-channels-toggle').checked = me.badge_channel_messages !== false;
   $('compact-toggle').checked = localStorage.getItem('compact') === '1';
   api('/calendar/url').then(r => { $('calendar-url').value = r.url; }).catch(() => {});
@@ -2955,8 +3007,9 @@ async function openSettings() {
 async function saveProfile() {
   const display_name = $('profile-display').value.trim();
   if (!display_name) return;
+  const status = $('profile-status').value.trim();  // "" clears it server-side
   try {
-    me = { ...me, ...(await api('/users/me', { method: 'PATCH', body: JSON.stringify({ display_name }) })) };
+    me = { ...me, ...(await api('/users/me', { method: 'PATCH', body: JSON.stringify({ display_name, status }) })) };
     renderMeHeader();
   } catch (e) { appAlert(e.message); }
 }
@@ -3405,6 +3458,7 @@ function renderMeHeader() {
   span.innerHTML = '';
   span.appendChild(avatarEl(me));
   span.appendChild(document.createTextNode(me.display_name));
+  span.title = me.status || 'Your account';
 }
 
 async function showApp() {

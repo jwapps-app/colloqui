@@ -44,6 +44,9 @@ async def update_me(
         user.display_name = body.display_name
     if body.badge_channel_messages is not None:
         user.badge_channel_messages = body.badge_channel_messages
+    if body.status is not None:
+        # Empty string clears it; otherwise store the trimmed note.
+        user.status = body.status.strip() or None
     db.add(user)
     return user
 

@@ -47,6 +47,10 @@ class User(Base):
     # land in the 🔔 inbox and count toward the unread/app badge — not just
     # @mentions and DMs. Users who find that noisy can switch it off.
     badge_channel_messages: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Optional free-text presence note shown next to the name ("On vacation").
+    status: Mapped[str | None] = mapped_column(String(80))
+    # Stamped when the user's last live socket drops; powers "last seen".
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class WebAuthnCredential(Base):
