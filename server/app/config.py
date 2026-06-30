@@ -17,15 +17,21 @@ class Settings(BaseSettings):
     # "v1.0.12"). "dev" for local/source builds. Surfaced in the UI footer.
     app_version: str = "dev"
 
-    # APNs (native iOS push). All optional — push is a silent no-op until these
-    # are set, so the server runs fine without them. The server talks to Apple
-    # directly with our own signing key (no third-party push gateway).
-    apns_key: str = ""        # the .p8 private key contents (PEM), OR…
-    apns_key_path: str = ""   # …a path to the .p8 file mounted into the container
-    apns_key_id: str = ""     # the key's Key ID
-    apns_team_id: str = ""    # Apple Developer Team ID
-    apns_topic: str = ""      # the app's bundle id, e.g. co.jjrrr.colloqui
-    apns_sandbox: bool = False  # true for dev/TestFlight builds (sandbox APNs)
+    # Native iOS push (APNs) is delivered via the self-hosted push-relay: one
+    # shared signing key + central metrics for all our apps. Silent no-op until
+    # the relay settings are configured. The relay does the Apple signing, so the
+    # .p8 key no longer lives here.
+    push_relay_url: str = ""       # e.g. http://192.168.1.42:8088 or https://push.<domain>
+    push_relay_api_key: str = ""   # the relay's API_KEY_COLLOQUI — secret, env only
+    apns_topic: str = "com.jworthington.colloqui"  # bundle id the relay routes on
+
+    # Legacy direct-to-Apple APNs settings — unused now that push goes through the
+    # relay. Kept so existing env files don't error; safe to remove later.
+    apns_key: str = ""
+    apns_key_path: str = ""
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_sandbox: bool = False
 
     # Web Push (PWA notifications) via VAPID. All optional — web push is a silent
     # no-op until these are set. Keys are base64url (generate them with the

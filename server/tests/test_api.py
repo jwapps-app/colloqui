@@ -542,19 +542,22 @@ async def test_device_registration(client, make_user):
     a_tok, a_id = await make_user("alice")
     b_tok, b_id = await make_user("bob")
 
-    # Register a token for alice.
+    # Register a token for alice (debug build → sandbox environment).
     assert (await client.post("/api/v1/devices", headers=auth(a_tok),
-            json={"token": "TOKENABC", "platform": "ios"})).status_code == 204
+            json={"token": "TOKENABC", "platform": "ios", "environment": "sandbox"})).status_code == 204
     async with SessionLocal() as db:
         dt = await db.get(DeviceToken, "TOKENABC")
         assert dt is not None and str(dt.user_id) == str(a_id)
+        assert dt.environment == "sandbox"
 
     # Re-registering the same token to bob reassigns it (upsert — still one row).
+    # Omitting environment defaults it to production.
     assert (await client.post("/api/v1/devices", headers=auth(b_tok),
             json={"token": "TOKENABC"})).status_code == 204
     async with SessionLocal() as db:
         rows = (await db.scalars(select(DeviceToken).where(DeviceToken.token == "TOKENABC"))).all()
         assert len(rows) == 1 and str(rows[0].user_id) == str(b_id)
+        assert rows[0].environment == "production"
 
     # A non-owner can't delete it; the owner can.
     await client.delete("/api/v1/devices/TOKENABC", headers=auth(a_tok))  # no-op
@@ -566,11 +569,6 @@ async def test_device_registration(client, make_user):
 
 
 async def test_push_apns(monkeypatch, make_user):
-    import time as _time
-
-    import jwt as pyjwt
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import ec
     from sqlalchemy import select
 
     from app import push
@@ -578,52 +576,49 @@ async def test_push_apns(monkeypatch, make_user):
     from app.db import SessionLocal
     from app.models import DeviceToken
 
-    # Disabled (and a no-op) until configured.
+    # Disabled (and a no-op) until the relay is configured.
     assert push.push_enabled() is False
 
-    key = ec.generate_private_key(ec.SECP256R1())
-    pem = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
-    monkeypatch.setattr(settings, "apns_key", pem)
-    monkeypatch.setattr(settings, "apns_key_id", "KEY123")
-    monkeypatch.setattr(settings, "apns_team_id", "TEAM123")
-    monkeypatch.setattr(settings, "apns_topic", "co.jjrrr.colloqui")
-    push._jwt_cache["token"] = None
+    monkeypatch.setattr(settings, "push_relay_url", "http://relay:8000")
+    monkeypatch.setattr(settings, "push_relay_api_key", "relaykey")
+    monkeypatch.setattr(settings, "apns_topic", "com.jworthington.colloqui")
     assert push.push_enabled() is True
 
-    # Provider JWT: valid ES256, carries our kid/team.
-    tok = push._provider_jwt(pem, _time.time())
-    assert pyjwt.get_unverified_header(tok) == {"alg": "ES256", "kid": "KEY123", "typ": "JWT"}
-    assert pyjwt.decode(tok, key.public_key(), algorithms=["ES256"])["iss"] == "TEAM123"
-
-    # _deliver posts to every token and prunes the ones APNs rejects (410).
+    # _deliver posts every token to the relay and prunes the ones it reports dead.
     _, c_id = await make_user("carol")
     async with SessionLocal() as db:
-        db.add(DeviceToken(token="LIVE", user_id=c_id, platform="ios"))
-        db.add(DeviceToken(token="DEAD", user_id=c_id, platform="ios"))
+        db.add(DeviceToken(token="LIVE", user_id=c_id, platform="ios", environment="sandbox"))
+        db.add(DeviceToken(token="DEAD", user_id=c_id, platform="ios", environment="production"))
         await db.commit()
 
-    sent: list[str] = []
+    sent: list[dict] = []
 
     class FakeResp:
-        def __init__(self, status): self.status_code = status; self.text = ""
-        def json(self): return {"reason": "Unregistered"} if self.status_code == 410 else {}
+        def __init__(self, status): self.status_code = status
+        def json(self):
+            return {"detail": "APNS error: Unregistered"} if self.status_code == 502 else {"status": "sent"}
 
     class FakeClient:
         def __init__(self, *a, **k): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
-        async def post(self, url, headers=None, content=None):
-            sent.append(url)
-            return FakeResp(410 if url.endswith("/DEAD") else 200)
+        async def post(self, url, json=None, headers=None):
+            sent.append({"url": url, "json": json, "headers": headers})
+            return FakeResp(502 if json["device_token"] == "DEAD" else 200)
 
     monkeypatch.setattr(push.httpx, "AsyncClient", FakeClient)
     await push._deliver(c_id, "hi", "there", {"channel_id": "x"}, 7)
 
-    assert any(u.endswith("/LIVE") for u in sent) and any(u.endswith("/DEAD") for u in sent)
+    # Posted to the relay's /notify with our API key, correct topic + per-token sandbox flag.
+    assert {s["url"] for s in sent} == {"http://relay:8000/notify"}
+    assert all(s["headers"]["X-API-Key"] == "relaykey" for s in sent)
+    by_token = {s["json"]["device_token"]: s["json"] for s in sent}
+    assert by_token["LIVE"]["bundle_id"] == "com.jworthington.colloqui"
+    assert by_token["LIVE"]["sandbox"] is True     # registered as a sandbox token
+    assert by_token["DEAD"]["sandbox"] is False    # registered as production
+    assert by_token["LIVE"]["custom_data"] == {"channel_id": "x"}
+    assert by_token["LIVE"]["badge"] == 7
+
     async with SessionLocal() as db:
         left = [t.token for t in (await db.scalars(
             select(DeviceToken).where(DeviceToken.user_id == c_id))).all()]
