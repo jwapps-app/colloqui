@@ -23,6 +23,11 @@ services:
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_SUBJECT=${VAPID_SUBJECT:-}
+      # Native iOS push via the self-hosted push-relay. Empty = off (no-op).
+      # Set PUSH_RELAY_URL + PUSH_RELAY_API_KEY as stack env vars to enable.
+      - PUSH_RELAY_URL=${PUSH_RELAY_URL:-}
+      - PUSH_RELAY_API_KEY=${PUSH_RELAY_API_KEY:-}
+      - APNS_TOPIC=${APNS_TOPIC:-com.jworthington.colloqui}
     ports:
       - "${API_PORT:-3300}:8000"
     volumes:
