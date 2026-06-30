@@ -423,8 +423,9 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
   display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
 }
+#thread-send { flex-shrink: 0; }
 #thread-input {
-  flex: 1; resize: none; min-height: 40px; max-height: 140px;
+  flex: 1; min-width: 0; resize: none; min-height: 40px; max-height: 140px;
   background: var(--bg); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: 9px 11px; font: inherit; line-height: 1.4;
 }
