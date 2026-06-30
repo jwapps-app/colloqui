@@ -327,6 +327,10 @@ class DeviceToken(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     platform: Mapped[str] = mapped_column(String(16), default="ios")
+    # Which APNs environment this token belongs to: "sandbox" (debug builds run
+    # from Xcode) or "production" (TestFlight / App Store). The relay routes per
+    # token, so both can coexist. Defaults to production for older registrations.
+    environment: Mapped[str] = mapped_column(String(16), default="production")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

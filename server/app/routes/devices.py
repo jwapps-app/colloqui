@@ -21,10 +21,16 @@ async def register_device(
     if existing is not None:
         existing.user_id = user.id
         existing.platform = body.platform
+        existing.environment = body.environment
         existing.last_seen_at = utcnow()
     else:
         db.add(
-            DeviceToken(token=body.token, user_id=user.id, platform=body.platform)
+            DeviceToken(
+                token=body.token,
+                user_id=user.id,
+                platform=body.platform,
+                environment=body.environment,
+            )
         )
 
 

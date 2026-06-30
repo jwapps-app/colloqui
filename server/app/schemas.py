@@ -137,6 +137,10 @@ class NotifyPrefIn(BaseModel):
 class DeviceRegisterIn(BaseModel):
     token: str = Field(min_length=1, max_length=200)
     platform: str = Field(default="ios", max_length=16)
+    # "sandbox" for debug builds run from Xcode, "production" for TestFlight /
+    # App Store. The app sets this via #if DEBUG. Defaults to production so older
+    # clients that omit it keep working.
+    environment: str = Field(default="production", max_length=16)
 
 
 class PushSubscriptionKeys(BaseModel):
