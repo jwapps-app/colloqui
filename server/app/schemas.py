@@ -106,6 +106,10 @@ class ChannelUpdateIn(BaseModel):
     topic: str | None = Field(default=None, max_length=200)
 
 
+class ChannelMoveIn(BaseModel):
+    space_id: uuid.UUID
+
+
 class ChannelOut(BaseModel):
     id: uuid.UUID
     name: str | None

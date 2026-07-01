@@ -19,12 +19,14 @@ from ..models import (
     File,
     Message,
     Reminder,
+    Space,
     SpaceMember,
     User,
     utcnow,
 )
 from ..schemas import (
     ChannelIn,
+    ChannelMoveIn,
     ChannelOut,
     ChannelUpdateIn,
     DMIn,
@@ -345,6 +347,70 @@ async def update_channel(
         await member_ids(db, channel_id),
         {"type": "channel.updated", "channel_id": str(channel_id)},
     )
+    return await channel_out(db, channel, user)
+
+
+@router.put("/channels/{channel_id}/space", response_model=ChannelOut)
+async def move_channel(
+    channel_id: uuid.UUID,
+    body: ChannelMoveIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ChannelOut:
+    """Move a channel to another space (owner or admin). Membership is
+    reconciled to the destination space: a public channel picks up all of that
+    space's members, and anyone no longer in the space is dropped, so nobody is
+    left subscribed to a channel they can no longer see."""
+    channel = await require_manageable(db, channel_id, user)
+    if channel.is_dm:
+        raise HTTPException(400, "DMs don't belong to a space")
+    space = await db.get(Space, body.space_id)
+    if space is None:
+        raise HTTPException(404, "Space not found")
+    if not user.is_admin and await db.get(SpaceMember, (space.id, user.id)) is None:
+        raise HTTPException(403, "You must be a member of the destination space")
+    if channel.space_id == space.id:
+        return await channel_out(db, channel, user)
+
+    old_members = set(await member_ids(db, channel_id))
+    channel.space_id = space.id
+    dest_members = set(
+        (
+            await db.scalars(
+                select(SpaceMember.user_id).where(SpaceMember.space_id == space.id)
+            )
+        ).all()
+    )
+    current = (
+        await db.scalars(
+            select(ChannelMember).where(ChannelMember.channel_id == channel.id)
+        )
+    ).all()
+    for cm in current:
+        if cm.user_id not in dest_members:
+            await db.delete(cm)
+    if not channel.is_private:
+        present = {cm.user_id for cm in current if cm.user_id in dest_members}
+        for uid in dest_members - present:
+            db.add(ChannelMember(channel_id=channel.id, user_id=uid))
+    await db.flush()
+    # Guarantee an owner remains (the mover, if the original owner was dropped).
+    remaining = (
+        await db.scalars(
+            select(ChannelMember).where(ChannelMember.channel_id == channel.id)
+        )
+    ).all()
+    if not any(m.role == "owner" for m in remaining):
+        mine = await db.get(ChannelMember, (channel.id, user.id))
+        if mine is None:
+            db.add(
+                ChannelMember(channel_id=channel.id, user_id=user.id, role="owner")
+            )
+        else:
+            mine.role = "owner"
+        await db.flush()
+    affected = old_members | dest_members | {user.id}
+    await manager.send_to_users(list(affected), {"type": "channels.changed"})
     return await channel_out(db, channel, user)
 
 

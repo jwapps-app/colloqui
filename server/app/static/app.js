@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '106';
+const APP_VERSION = '107';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -223,13 +223,29 @@ function openDialog(opts) {
     msg.classList.toggle('hidden', !opts.message);
     const input = $('dialog-input');
     const ta = $('dialog-textarea');
+    const sel = $('dialog-select');
     input.classList.add('hidden');
     ta.classList.add('hidden');
-    const field = opts.input === 'textarea' ? ta : opts.input === 'text' ? input : null;
-    if (field) {
-      field.classList.remove('hidden');
-      field.value = opts.value || '';
-      field.placeholder = opts.placeholder || '';
+    sel.classList.add('hidden');
+    let field = null;
+    if (opts.input === 'select') {
+      field = sel;
+      sel.innerHTML = '';
+      for (const o of (opts.options || [])) {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        if (o.value === (opts.value || '')) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      sel.classList.remove('hidden');
+    } else {
+      field = opts.input === 'textarea' ? ta : opts.input === 'text' ? input : null;
+      if (field) {
+        field.classList.remove('hidden');
+        field.value = opts.value || '';
+        field.placeholder = opts.placeholder || '';
+      }
     }
     const ok = $('dialog-ok');
     const cancel = $('dialog-cancel');
@@ -252,6 +268,8 @@ function resolveDialog(confirmed) {
   if (!resolve) return;
   if (d.dataset.mode === 'input') {
     if (!confirmed) return resolve(null);
+    const sel = $('dialog-select');
+    if (!sel.classList.contains('hidden')) return resolve(sel.value);
     const ta = $('dialog-textarea');
     resolve(ta.classList.contains('hidden') ? $('dialog-input').value : ta.value);
   } else {
@@ -269,6 +287,13 @@ function appPrompt(message, opts = {}) {
   return openDialog({
     title: opts.title, message, input: opts.multiline ? 'textarea' : 'text',
     value: opts.value, placeholder: opts.placeholder, okText: opts.okText || 'Save',
+  });
+}
+// options: [{ value, label }]. Resolves to the chosen value, or null if cancelled.
+function appChoose(message, options, opts = {}) {
+  return openDialog({
+    title: opts.title, message, input: 'select', options,
+    value: opts.value, okText: opts.okText || 'Save',
   });
 }
 
@@ -903,11 +928,28 @@ async function editChannel() {
   if (name === null) return;
   const topic = await appPrompt('Topic (empty to clear):', { value: currentChannel.topic || '' });
   if (topic === null) return;
+  // Optional: move to another space. Only offer spaces other than the current one.
+  let moveTo = null;
+  const others = spaces.filter(s => s.id !== currentChannel.space_id);
+  if (others.length) {
+    const choice = await appChoose('Space:', [
+      { value: '', label: 'Keep in current space' },
+      ...others.map(s => ({ value: s.id, label: 'Move to ' + s.name })),
+    ], { value: '' });
+    if (choice === null) return;
+    if (choice) moveTo = choice;
+  }
   try {
     await api(`/channels/${currentChannel.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name: name.trim() || null, topic }),
     });
+    if (moveTo) {
+      await api(`/channels/${currentChannel.id}/space`, {
+        method: 'PUT',
+        body: JSON.stringify({ space_id: moveTo }),
+      });
+    }
     await loadChannels();
   } catch (e) { appAlert(e.message); }
 }

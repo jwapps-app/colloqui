@@ -1062,3 +1062,33 @@ async def test_event_subscription_crud(client, make_user):
             f"/api/v1/admin/event-subscriptions/{sub_id}", headers=auth(admin_tok)
         )
     ).status_code == 204
+
+
+async def test_move_channel_between_spaces(client, make_user):
+    admin_tok, _ = await make_user("madmin", is_admin=True)
+    a = (await client.post("/api/v1/spaces", headers=auth(admin_tok),
+                           json={"name": "SpaceA"})).json()
+    b = (await client.post("/api/v1/spaces", headers=auth(admin_tok),
+                           json={"name": "SpaceB"})).json()
+    # bob is a member of B only
+    bob_tok, bob_id = await make_user("bobmove")
+    await client.post(f"/api/v1/spaces/{b['id']}/members", headers=auth(admin_tok),
+                      json={"user_id": str(bob_id)})
+    # a public channel in A
+    ch = (await client.post("/api/v1/channels", headers=auth(admin_tok),
+                            json={"name": "movable", "is_private": False,
+                                  "space_id": a["id"]})).json()
+    # bob (not in A) does not see it yet
+    seen = await client.get("/api/v1/channels", headers=auth(bob_tok))
+    assert all(c["id"] != ch["id"] for c in seen.json())
+    # move it to B
+    r = await client.put(f"/api/v1/channels/{ch['id']}/space",
+                         headers=auth(admin_tok), json={"space_id": b["id"]})
+    assert r.status_code == 200
+    assert r.json()["space_id"] == b["id"]
+    # now bob (in B) sees it: a public channel picks up the new space's members
+    seen = await client.get("/api/v1/channels", headers=auth(bob_tok))
+    assert any(c["id"] == ch["id"] for c in seen.json())
+    # a non-owner, non-admin cannot move it
+    assert (await client.put(f"/api/v1/channels/{ch['id']}/space",
+            headers=auth(bob_tok), json={"space_id": a["id"]})).status_code in (403, 404)
