@@ -12,7 +12,7 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=81">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=81">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=81">
-<link rel="stylesheet" href="/style.css?v=107">
+<link rel="stylesheet" href="/style.css?v=108">
 <script>
   // Set the theme before first paint to avoid a flash of the wrong palette.
   (function () {
@@ -137,6 +137,11 @@
       <section>
         <h3>Notifications</h3>
         <div id="notify-pref" class="seg"></div>
+      </section>
+      <section id="info-space-section" class="hidden">
+        <h3>Space</h3>
+        <p id="info-space-current" class="muted"></p>
+        <button id="channel-move-btn">Move to another space…</button>
       </section>
       <section>
         <h3>Threads</h3>
@@ -453,6 +458,6 @@
   </div>
 </div>
 
-<script src="/app.js?v=107"></script>
+<script src="/app.js?v=108"></script>
 </body>
 </html>

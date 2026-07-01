@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '107';
+const APP_VERSION = '108';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -928,28 +928,11 @@ async function editChannel() {
   if (name === null) return;
   const topic = await appPrompt('Topic (empty to clear):', { value: currentChannel.topic || '' });
   if (topic === null) return;
-  // Optional: move to another space. Only offer spaces other than the current one.
-  let moveTo = null;
-  const others = spaces.filter(s => s.id !== currentChannel.space_id);
-  if (others.length) {
-    const choice = await appChoose('Space:', [
-      { value: '', label: 'Keep in current space' },
-      ...others.map(s => ({ value: s.id, label: 'Move to ' + s.name })),
-    ], { value: '' });
-    if (choice === null) return;
-    if (choice) moveTo = choice;
-  }
   try {
     await api(`/channels/${currentChannel.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name: name.trim() || null, topic }),
     });
-    if (moveTo) {
-      await api(`/channels/${currentChannel.id}/space`, {
-        method: 'PUT',
-        body: JSON.stringify({ space_id: moveTo }),
-      });
-    }
     await loadChannels();
   } catch (e) { appAlert(e.message); }
 }
@@ -1281,9 +1264,45 @@ async function createWebhook() {
   } catch (e) { appAlert(e.message); }
 }
 
+// Manager-only "Space" section in the info pane: shows the current space and a
+// direct "move to another space" action (no rename detour).
+function renderChannelSpace() {
+  const section = $('info-space-section');
+  if (!currentChannel || !canManage(currentChannel)) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  const sp = spaces.find(s => s.id === currentChannel.space_id);
+  $('info-space-current').textContent = 'Currently in: ' + (sp ? sp.name : '—');
+  const btn = $('channel-move-btn');
+  btn.disabled = spaces.filter(s => s.id !== currentChannel.space_id).length === 0;
+  btn.onclick = moveChannelPrompt;
+}
+
+async function moveChannelPrompt() {
+  if (!currentChannel || !canManage(currentChannel)) return;
+  const others = spaces.filter(s => s.id !== currentChannel.space_id);
+  if (!others.length) { appAlert('There are no other spaces to move this into.'); return; }
+  const choice = await appChoose(
+    `Move “#${currentChannel.name}” to which space?`,
+    others.map(s => ({ value: s.id, label: s.name })),
+    { okText: 'Move' },
+  );
+  if (!choice) return;
+  try {
+    await api(`/channels/${currentChannel.id}/space`, {
+      method: 'PUT', body: JSON.stringify({ space_id: choice }),
+    });
+    await loadChannels();
+    loadInfoPane();
+  } catch (e) { appAlert(e.message); }
+}
+
 async function loadInfoPane() {
   if (!currentChannel || $('info-pane').classList.contains('hidden')) return;
   renderNotifyPref();
+  renderChannelSpace();
   renderWebhooks();
   const cid = currentChannel.id;
   const taskList = $('info-tasks');
