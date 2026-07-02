@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import models  # noqa: F401 — registers tables on Base.metadata
@@ -86,6 +87,9 @@ docs_kwargs = (
     {} if settings.dev_mode else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 )
 app = FastAPI(title="api", lifespan=lifespan, **docs_kwargs)
+# Compress text responses (app.js ~150KB, style.css, JSON). Skips already-small
+# bodies and non-compressible binaries (images) automatically.
+app.add_middleware(GZipMiddleware, minimum_size=600)
 
 _ws_origin = settings.origin.replace("https://", "wss://").replace("http://", "ws://")
 CSP = (
@@ -117,9 +121,14 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
     if request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
+    elif request.query_params.get("v"):
+        # Version-stamped assets (app.js?v=N, icons?v=N) never change under a
+        # given URL, so cache them for a year and skip the revalidation round
+        # trip. A new release bumps ?v=, which is a fresh URL, so updates land.
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
     else:
-        # Static files: always revalidate (cheap 304s via ETag) so clients
-        # pick up new app.js/css on plain reload instead of serving stale UI.
+        # index.html, sw.js, manifest.json: always revalidate (cheap 304 via
+        # ETag) so a new release's ?v= bump is picked up on the next reload.
         response.headers.setdefault("Cache-Control", "no-cache")
     return response
 

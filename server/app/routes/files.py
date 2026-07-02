@@ -1,6 +1,7 @@
 import uuid
 from pathlib import Path
 
+from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +41,9 @@ async def upload_file(
                     raise HTTPException(
                         413, f"File exceeds the {settings.max_file_size_mb} MB limit"
                     )
-                out.write(chunk)
+                # Offload the blocking disk write so a large upload doesn't stall
+                # the event loop (and everyone else's requests) mid-transfer.
+                await to_thread.run_sync(out.write, chunk)
     except HTTPException:
         dest.unlink(missing_ok=True)
         raise

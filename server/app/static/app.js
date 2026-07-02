@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '109';
+const APP_VERSION = '110';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -691,6 +691,7 @@ function channelLi(ch) {
     const dot = document.createElement('span');
     const st = presenceOf(ch.dm_user.id);
     dot.className = 'dot ' + st;
+    dot.dataset.uid = ch.dm_user.id;  // so presence updates can patch it in place
     dot.title = ch.dm_user.status || (st === 'offline' ? lastSeenText(ch.dm_user) : st);
     li.appendChild(dot);
   }
@@ -1096,8 +1097,13 @@ function avatarEl(user) {
 
 // ---------- messages ----------
 
+const IMAGE_CACHE_MAX = 60;  // bounded LRU so a long session can't leak blob URLs
 async function loadAuthedFile(fileId) {
-  if (imageUrls.has(fileId)) return imageUrls.get(fileId);
+  const cached = imageUrls.get(fileId);
+  if (cached) {
+    imageUrls.delete(fileId); imageUrls.set(fileId, cached);  // mark most-recent
+    return cached;
+  }
   const res = await fetch(`/api/v1/files/${fileId}`, {
     headers: { Authorization: 'Bearer ' + token },
   });
@@ -1105,6 +1111,13 @@ async function loadAuthedFile(fileId) {
   const blob = await res.blob();
   const entry = { blob, url: URL.createObjectURL(blob) };
   imageUrls.set(fileId, entry);
+  // Evict the oldest and free its object URL once over the cap.
+  while (imageUrls.size > IMAGE_CACHE_MAX) {
+    const oldest = imageUrls.keys().next().value;
+    const ev = imageUrls.get(oldest);
+    imageUrls.delete(oldest);
+    if (ev) URL.revokeObjectURL(ev.url);
+  }
   return entry;
 }
 
@@ -1140,9 +1153,12 @@ function closePreview() {
 
 // ---------- channel info pane (tasks + reminders) ----------
 
-function isNarrow() {
-  return window.matchMedia('(max-width: 700px)').matches;
-}
+// Cached MediaQueryList objects — constructing matchMedia() per call (once per
+// message node, per click) is wasteful; these update themselves live.
+const _mqNarrow = window.matchMedia('(max-width: 700px)');
+const _mqHover = window.matchMedia('(hover: hover)');
+function isNarrow() { return _mqNarrow.matches; }
+function hasHover() { return _mqHover.matches; }
 
 function closeInfoPane() {
   $('info-pane').classList.add('hidden');
@@ -1828,7 +1844,7 @@ function buildMessageNode(m, opts) {
   // Only true wide hover-capable desktops skip it and use the inline hover icons
   // instead; an iPad PWA is wide but has no hover, so it gets the menu too.
   div.addEventListener('click', (e) => {
-    if (!isNarrow() && matchMedia('(hover: hover)').matches) return;
+    if (!isNarrow() && hasHover()) return;
     if (e.target.closest('a, button, input, label, img, .reply-preview, .thread-summary')) return;
     openMsgMenu(div, acts);
   });
@@ -2953,7 +2969,8 @@ function handleEvent(data) {
 // Re-render presence dots wherever they appear. DM dots are rebuilt by
 // renderChannels; member-list and footer dots carry data-uid and update here.
 function onPresenceChanged() {
-  renderChannels();
+  // Patch just the presence dots (DM list, member pane) instead of rebuilding
+  // the whole sidebar on every online/away/offline flip.
   document.querySelectorAll('.dot[data-uid]').forEach(d => {
     d.className = 'dot ' + presenceOf(d.dataset.uid);
   });
@@ -2980,13 +2997,25 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) sendPresence('away'); else armIdle();
 });
 
+let wsPingTimer = null;
 function connectWs() {
   if (sock) sock.close();
+  clearInterval(wsPingTimer);
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   sock = new WebSocket(`${proto}//${location.host}/api/v1/ws`);
-  sock.onopen = () => sock.send(JSON.stringify({ token }));
+  sock.onopen = () => {
+    sock.send(JSON.stringify({ token }));
+    // Keep the socket alive through Cloudflare Tunnel's ~100s idle timeout, and
+    // detect a silently dropped connection so we reconnect promptly.
+    clearInterval(wsPingTimer);
+    wsPingTimer = setInterval(() => {
+      if (sock && sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+  };
   sock.onmessage = ev => handleEvent(JSON.parse(ev.data));
-  sock.onclose = () => { if (token) setTimeout(connectWs, 3000); };
+  sock.onclose = () => { clearInterval(wsPingTimer); if (token) setTimeout(connectWs, 3000); };
 }
 
 // ---------- settings ----------
@@ -3549,14 +3578,17 @@ async function showApp() {
   $('app').classList.remove('hidden');
   renderMeHeader();
   $('settings-btn').classList.toggle('hidden', !me.is_admin);
-  await loadChannels();
+  // Fire the independent startup fetches together instead of serially, so the
+  // channel list and badges paint sooner. connectWs runs immediately so live
+  // events start flowing while the initial data loads.
   connectWs();
-  try {
-    notifUnread = (await api('/notifications')).filter(n => !n.read_at).length;
-    updateNotifBadge();
-  } catch {}
-  refreshTaskCount();
-  refreshThreadCount();
+  const loadNotifCount = (async () => {
+    try {
+      notifUnread = (await api('/notifications')).filter(n => !n.read_at).length;
+      updateNotifBadge();
+    } catch {}
+  })();
+  await Promise.all([loadChannels(), loadNotifCount, refreshTaskCount(), refreshThreadCount()]);
   setupPushSubscription();  // if permission was already granted on a prior visit
   maybeOpenDeepLink();      // a push tapped while the app was closed
 }

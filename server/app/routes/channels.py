@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -237,6 +237,182 @@ async def mark_read(
         db.add(ChannelRead(channel_id=channel_id, user_id=user.id, last_read_at=utcnow()))
 
 
+async def channels_out_bulk(
+    db: AsyncSession, channels: list[Channel], me: User
+) -> list[ChannelOut]:
+    """Build ChannelOut for many channels with a fixed number of grouped queries
+    instead of ~9 per channel. Same output as channel_out(), used by the hot
+    my_channels listing."""
+    if not channels:
+        return []
+    ids = [c.id for c in channels]
+    dm_ids = [c.id for c in channels if c.is_dm]
+    non_dm_ids = [c.id for c in channels if not c.is_dm]
+    now = utcnow()
+    week_ago = now - timedelta(days=7)
+    thread_cutoff = now - timedelta(days=THREAD_ACTIVE_DAYS)
+
+    async def counts(*conds, distinct_col=None) -> dict:
+        col = func.count(func.distinct(distinct_col)) if distinct_col is not None else func.count()
+        rows = (
+            await db.execute(
+                select(Message.channel_id, col)
+                .where(Message.channel_id.in_(ids), *conds)
+                .group_by(Message.channel_id)
+            )
+        ).all()
+        return {cid: n for cid, n in rows}
+
+    total_by = await counts(Message.deleted_at.is_(None), Message.thread_root_id.is_(None))
+    recent_by = await counts(
+        Message.deleted_at.is_(None),
+        Message.thread_root_id.is_(None),
+        Message.created_at >= week_ago,
+    )
+    pinned_by = await counts(Message.deleted_at.is_(None), Message.pinned_at.is_not(None))
+    thread_by = await counts(
+        Message.deleted_at.is_(None),
+        Message.thread_root_id.is_not(None),
+        Message.created_at >= thread_cutoff,
+        distinct_col=Message.thread_root_id,
+    )
+
+    # Unread: not mine, after my per-channel read marker (or all if never read).
+    unread_by = {
+        cid: n
+        for cid, n in (
+            await db.execute(
+                select(Message.channel_id, func.count())
+                .select_from(Message)
+                .outerjoin(
+                    ChannelRead,
+                    and_(
+                        ChannelRead.channel_id == Message.channel_id,
+                        ChannelRead.user_id == me.id,
+                    ),
+                )
+                .where(
+                    Message.channel_id.in_(ids),
+                    Message.deleted_at.is_(None),
+                    Message.sender_id != me.id,
+                    or_(
+                        ChannelRead.last_read_at.is_(None),
+                        Message.created_at > ChannelRead.last_read_at,
+                    ),
+                )
+                .group_by(Message.channel_id)
+            )
+        ).all()
+    }
+
+    reminder_by = {
+        cid: n
+        for cid, n in (
+            await db.execute(
+                select(Reminder.channel_id, func.count())
+                .where(
+                    Reminder.channel_id.in_(ids),
+                    Reminder.user_id == me.id,
+                    Reminder.fired_at.is_(None),
+                )
+                .group_by(Reminder.channel_id)
+            )
+        ).all()
+    }
+    role_by = dict(
+        (
+            await db.execute(
+                select(ChannelMember.channel_id, ChannelMember.role).where(
+                    ChannelMember.channel_id.in_(ids), ChannelMember.user_id == me.id
+                )
+            )
+        ).all()
+    )
+    pref_by = dict(
+        (
+            await db.execute(
+                select(ChannelNotifyPref.channel_id, ChannelNotifyPref.level).where(
+                    ChannelNotifyPref.channel_id.in_(ids),
+                    ChannelNotifyPref.user_id == me.id,
+                )
+            )
+        ).all()
+    )
+
+    # Open task counts: one scan of just the task-bearing messages, tallied per
+    # channel (checkbox lines that are still unchecked).
+    task_by: dict = {}
+    if non_dm_ids:
+        for cid, content in (
+            await db.execute(
+                select(Message.channel_id, Message.content).where(
+                    Message.channel_id.in_(non_dm_ids),
+                    Message.deleted_at.is_(None),
+                    Message.content.ilike("%[ ] %"),
+                )
+            )
+        ).all():
+            task_by[cid] = task_by.get(cid, 0) + sum(
+                1 for line in content.split("\n") if re.match(r"^\[ \] .", line)
+            )
+
+    # DM participants, bulk-fetched.
+    dm_members_by: dict = {}
+    if dm_ids:
+        member_rows = (
+            await db.execute(
+                select(ChannelMember.channel_id, ChannelMember.user_id).where(
+                    ChannelMember.channel_id.in_(dm_ids),
+                    ChannelMember.user_id != me.id,
+                )
+            )
+        ).all()
+        wanted = {uid for _, uid in member_rows}
+        users_by = {}
+        if wanted:
+            users_by = {
+                u.id: u
+                for u in (await db.scalars(select(User).where(User.id.in_(wanted)))).all()
+            }
+        for cid, uid in member_rows:
+            u = users_by.get(uid)
+            if u:
+                dm_members_by.setdefault(cid, []).append(u)
+
+    out: list[ChannelOut] = []
+    for c in channels:
+        dm_user = None
+        dm_members: list[UserOut] = []
+        if c.is_dm:
+            mems = dm_members_by.get(c.id, [])
+            if len(mems) == 1:
+                dm_user = UserOut.model_validate(mems[0])
+            elif mems:
+                dm_members = [UserOut.model_validate(m) for m in mems]
+        out.append(
+            ChannelOut(
+                id=c.id,
+                name=c.name,
+                topic=c.topic,
+                is_private=c.is_private,
+                is_dm=c.is_dm,
+                space_id=c.space_id,
+                dm_user=dm_user,
+                dm_members=dm_members,
+                my_role=role_by.get(c.id),
+                message_count=total_by.get(c.id, 0),
+                recent_count=recent_by.get(c.id, 0),
+                unread_count=unread_by.get(c.id, 0),
+                open_task_count=task_by.get(c.id, 0),
+                reminder_count=reminder_by.get(c.id, 0),
+                pinned_count=pinned_by.get(c.id, 0),
+                thread_count=thread_by.get(c.id, 0),
+                notify_level=pref_by.get(c.id) or default_notify_level(c),
+            )
+        )
+    return out
+
+
 @router.get("/channels", response_model=list[ChannelOut])
 async def my_channels(
     db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
@@ -249,7 +425,7 @@ async def my_channels(
             .order_by(Channel.created_at)
         )
     ).all()
-    return [await channel_out(db, c, user) for c in channels]
+    return await channels_out_bulk(db, list(channels), user)
 
 
 @router.get("/channels/browse", response_model=list[ChannelOut])
