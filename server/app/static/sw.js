@@ -48,6 +48,24 @@ self.addEventListener('push', (event) => {
   })());
 });
 
+// The app asks us to dismiss delivered notifications once the user is actually
+// looking at the app (or has read a channel). Without this, Web Push
+// notifications linger in the Android shade and keep a "dot" on the app icon
+// even after everything's been read. Optionally clears the app-icon badge too.
+self.addEventListener('message', (event) => {
+  const m = event.data || {};
+  if (m.type !== 'clear-notifications') return;
+  event.waitUntil((async () => {
+    const list = await self.registration.getNotifications(
+      m.channelId ? { tag: m.channelId } : {}
+    );
+    for (const n of list) n.close();
+    if (m.clearBadge && self.navigator && self.navigator.clearAppBadge) {
+      try { await self.navigator.clearAppBadge(); } catch (e) {}
+    }
+  })());
+});
+
 // Tapping a notification jumps to its channel: focus an existing window and
 // tell it which channel to open, or open the app pointed at that channel.
 self.addEventListener('notificationclick', (event) => {

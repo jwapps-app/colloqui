@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '108';
+const APP_VERSION = '109';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -738,10 +738,24 @@ function markRead(channelId) {
   api(`/channels/${channelId}/read`, { method: 'POST' }).catch(() => {});
 }
 
+// Dismiss delivered push notifications from the OS shade (all, or one channel's
+// by tag). Without this they linger and keep an app-icon dot on Android even
+// after the messages have been read in-app.
+async function clearDeliveredNotifs(channelId, clearBadge) {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (reg.active) {
+      reg.active.postMessage({ type: 'clear-notifications', channelId, clearBadge: !!clearBadge });
+    }
+  } catch {}
+}
+
 // Opening a channel clears its 🔔 notifications and drops the unread/app badge
 // by however many were cleared (so tapping a push, or just reading the channel,
 // brings the count down).
 async function clearChannelNotifs(channelId) {
+  clearDeliveredNotifs(channelId);  // close that channel's shade notifications
   try {
     const r = await api(`/notifications/read-channel/${channelId}`, { method: 'POST' });
     if (r && r.cleared > 0) {
@@ -2461,7 +2475,14 @@ async function openNotifs() {
   try { await api('/notifications/read-all', { method: 'POST' }); } catch {}
   notifUnread = 0;
   updateNotifBadge();
+  clearDeliveredNotifs(null, true);  // wipe the shade + app-icon badge
 }
+
+// Returning to the app clears the OS notification shade (you're looking at it
+// now), so Android's app-icon dot doesn't linger after you've opened the app.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) clearDeliveredNotifs();
+});
 
 function maybeBrowserNotify(n) {
   if (document.visibilityState === 'visible') return;
