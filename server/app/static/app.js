@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '110';
+const APP_VERSION = '111';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -385,12 +385,21 @@ async function loginWithPassword() {
   const username = $('login-username').value.trim();
   const password = $('login-password').value;
   if (!username || !password) { authError('Enter your username and password.'); return; }
+  const code = $('login-code').value.trim() || undefined;  // only after 2FA prompt
   try {
     const result = await api('/auth/login/password', {
-      method: 'POST', body: JSON.stringify({ username, password }),
+      method: 'POST', body: JSON.stringify({ username, password, code }),
     });
     onSignedIn(result);
-  } catch (e) { authError(e.message); }
+  } catch (e) {
+    if (e.message === 'mfa_required') {
+      $('login-code').classList.remove('hidden');
+      $('login-code').focus();
+      authError('Enter the 6-digit code from your authenticator app (or a recovery code).');
+    } else {
+      authError(e.message);
+    }
+  }
 }
 
 async function registerWithPassword() {
@@ -3056,7 +3065,58 @@ async function openAccount() {
   $('compact-toggle').checked = localStorage.getItem('compact') === '1';
   api('/calendar/url').then(r => { $('calendar-url').value = r.url; }).catch(() => {});
   loadPasswordSection();
+  loadTotpSection();
   await Promise.all([loadPasskeys(), loadSessions()]);
+}
+
+async function loadTotpSection() {
+  $('totp-enroll').classList.add('hidden');
+  $('totp-recovery').classList.add('hidden');
+  let enabled = false;
+  try { enabled = (await api('/auth/totp')).enabled; } catch {}
+  $('totp-state').textContent = enabled
+    ? 'On. Password sign-in asks for a code from your authenticator app.'
+    : 'Off. Adds a second step to password sign-in. Passkey sign-in is already strong and never asks for a code.';
+  $('totp-enable').classList.toggle('hidden', enabled);
+  $('totp-disable').classList.toggle('hidden', !enabled);
+}
+
+async function startTotpEnroll() {
+  try {
+    const s = await api('/auth/totp/setup', { method: 'POST' });
+    $('totp-qr').innerHTML = s.qr_svg;   // our own server-generated SVG
+    $('totp-secret').textContent = s.secret;
+    $('totp-code').value = '';
+    $('totp-enable').classList.add('hidden');
+    $('totp-enroll').classList.remove('hidden');
+    $('totp-code').focus();
+  } catch (e) { appAlert(e.message); }
+}
+
+async function confirmTotpEnroll() {
+  const code = $('totp-code').value.trim();
+  if (!code) return;
+  try {
+    const r = await api('/auth/totp/confirm', { method: 'POST', body: JSON.stringify({ code }) });
+    $('totp-enroll').classList.add('hidden');
+    const list = $('totp-recovery-list');
+    list.innerHTML = '';
+    for (const c of r.recovery_codes) {
+      const li = document.createElement('li');
+      li.textContent = c;
+      list.appendChild(li);
+    }
+    $('totp-recovery').classList.remove('hidden');
+  } catch (e) { appAlert(e.message); }
+}
+
+async function disableTotp() {
+  const code = await appPrompt('Enter a current code from your app (or a recovery code) to turn off 2FA:');
+  if (!code) return;
+  try {
+    await api('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ code: code.trim() }) });
+    await loadTotpSection();
+  } catch (e) { appAlert(e.message); }
 }
 
 async function loadPasswordSection() {
@@ -3905,6 +3965,11 @@ $('messages').onscroll = () => {
 $('add-passkey').onclick = addPasskey;
 $('pw-save').onclick = savePassword;
 $('pw-remove').onclick = removePassword;
+$('totp-enable').onclick = startTotpEnroll;
+$('totp-confirm').onclick = confirmTotpEnroll;
+$('totp-cancel').onclick = () => loadTotpSection();
+$('totp-disable').onclick = disableTotp;
+$('totp-recovery-done').onclick = () => loadTotpSection();
 $('attach-btn').onclick = () => $('file-input').click();
 $('file-input').onchange = uploadAttachment;
 

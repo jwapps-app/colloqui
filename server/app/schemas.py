@@ -37,6 +37,26 @@ class LoginOptionsIn(BaseModel):
 class LoginPasswordIn(BaseModel):
     username: str = Field(max_length=32)
     password: str = Field(max_length=200)
+    # A TOTP or recovery code, supplied on the second attempt when 2FA is on.
+    code: str | None = Field(default=None, max_length=32)
+
+
+class TotpStatusOut(BaseModel):
+    enabled: bool
+
+
+class TotpSetupOut(BaseModel):
+    secret: str        # base32, for manual entry
+    otpauth_uri: str   # for the authenticator app
+    qr_svg: str        # inline SVG of the otpauth URI
+
+
+class TotpCodeIn(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+
+
+class RecoveryCodesOut(BaseModel):
+    recovery_codes: list[str]  # plaintext, shown exactly once
 
 
 class RegisterPasswordIn(BaseModel):

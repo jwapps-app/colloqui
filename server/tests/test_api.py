@@ -1092,3 +1092,39 @@ async def test_move_channel_between_spaces(client, make_user):
     # a non-owner, non-admin cannot move it
     assert (await client.put(f"/api/v1/channels/{ch['id']}/space",
             headers=auth(bob_tok), json={"space_id": a["id"]})).status_code in (403, 404)
+
+
+async def test_totp_2fa_flow(client, make_user):
+    import pyotp
+
+    tok, _ = await make_user("totpuser")
+    pw = "hunter2hunter"
+    assert (await client.post("/api/v1/auth/password", headers=auth(tok),
+                              json={"password": pw})).status_code == 200
+    # enroll
+    setup = (await client.post("/api/v1/auth/totp/setup", headers=auth(tok))).json()
+    secret = setup["secret"]
+    assert setup["qr_svg"].startswith("<?xml") or "<svg" in setup["qr_svg"]
+    rc = (await client.post("/api/v1/auth/totp/confirm", headers=auth(tok),
+                            json={"code": pyotp.TOTP(secret).now()})).json()
+    assert len(rc["recovery_codes"]) == 10
+    assert (await client.get("/api/v1/auth/totp", headers=auth(tok))).json()["enabled"] is True
+    # password login now needs a second factor
+    r = await client.post("/api/v1/auth/login/password",
+                          json={"username": "totpuser", "password": pw})
+    assert r.status_code == 401 and r.json()["detail"] == "mfa_required"
+    # a live TOTP code works
+    r = await client.post("/api/v1/auth/login/password",
+                          json={"username": "totpuser", "password": pw,
+                                "code": pyotp.TOTP(secret).now()})
+    assert r.status_code == 200 and r.json().get("token")
+    # a recovery code works once, then is consumed
+    body = {"username": "totpuser", "password": pw, "code": rc["recovery_codes"][0]}
+    assert (await client.post("/api/v1/auth/login/password", json=body)).status_code == 200
+    assert (await client.post("/api/v1/auth/login/password", json=body)).status_code == 401
+    # disabling requires a code, then password login is single-factor again
+    assert (await client.post("/api/v1/auth/totp/disable", headers=auth(tok),
+                              json={"code": pyotp.TOTP(secret).now()})).status_code == 204
+    r = await client.post("/api/v1/auth/login/password",
+                          json={"username": "totpuser", "password": pw})
+    assert r.status_code == 200

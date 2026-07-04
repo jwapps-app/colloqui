@@ -12,7 +12,7 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=81">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=81">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=81">
-<link rel="stylesheet" href="/style.css?v=110">
+<link rel="stylesheet" href="/style.css?v=111">
 <script>
   // Set the theme before first paint to avoid a flash of the wrong palette.
   (function () {
@@ -31,6 +31,7 @@
     <div id="login-view">
       <input id="login-username" placeholder="username" autocomplete="username webauthn">
       <input type="password" id="login-password" placeholder="password (if you have one)" autocomplete="current-password">
+      <input id="login-code" class="hidden" placeholder="2FA code" autocomplete="one-time-code" inputmode="text" maxlength="32">
       <button id="login-password-btn" class="primary">Sign in</button>
       <button id="login-btn">Sign in with passkey</button>
       <p class="muted">New here? <a href="#" id="show-register">Register with an invite</a></p>
@@ -212,6 +213,27 @@
       <div class="row">
         <button id="pw-save">Save password</button>
         <button id="pw-remove" class="hidden">Remove password</button>
+      </div>
+    </section>
+    <section id="totp-section">
+      <h3>Two-factor authentication</h3>
+      <p id="totp-state" class="muted"></p>
+      <button id="totp-enable">Enable 2FA</button>
+      <button id="totp-disable" class="danger-btn hidden">Disable 2FA</button>
+      <div id="totp-enroll" class="hidden">
+        <p class="muted">Scan this with an authenticator app (Google Authenticator, Authy, 1Password), then enter the 6-digit code to confirm.</p>
+        <div id="totp-qr" class="totp-qr"></div>
+        <p class="muted">Or type the key in manually: <code id="totp-secret"></code></p>
+        <input id="totp-code" class="full" placeholder="6-digit code" inputmode="numeric" maxlength="8" autocomplete="one-time-code">
+        <div class="row">
+          <button id="totp-confirm" class="primary">Confirm</button>
+          <button id="totp-cancel">Cancel</button>
+        </div>
+      </div>
+      <div id="totp-recovery" class="hidden">
+        <p><b>Save your recovery codes.</b> Each works once if you lose your authenticator, and they won't be shown again.</p>
+        <ul id="totp-recovery-list" class="recovery-codes"></ul>
+        <button id="totp-recovery-done" class="primary">I've saved them</button>
       </div>
     </section>
     <section>
@@ -458,6 +480,6 @@
   </div>
 </div>
 
-<script src="/app.js?v=110"></script>
+<script src="/app.js?v=111"></script>
 </body>
 </html>

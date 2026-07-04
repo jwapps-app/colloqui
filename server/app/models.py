@@ -456,3 +456,20 @@ class EventSubscription(Base):
     events: Mapped[str | None] = mapped_column(String(300))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TotpCredential(Base):
+    """TOTP second factor for password logins. `confirmed_at` stays null until
+    the user proves possession by entering a code; only a confirmed credential
+    gates login. `recovery_codes` holds SHA-256 hashes of the unused one-time
+    backup codes."""
+
+    __tablename__ = "totp_credentials"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    secret: Mapped[str] = mapped_column(String(64))  # base32 TOTP secret
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    recovery_codes: Mapped[list] = mapped_column(JSON, default=list)

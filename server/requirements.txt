@@ -11,3 +11,5 @@ httpx>=0.27,<1.0
 h2>=4.1,<5.0            # HTTP/2 for httpx — required by APNs
 pyjwt[crypto]>=2.8,<3.0  # ES256 provider tokens for APNs
 pywebpush>=2.0,<3.0      # Web Push (VAPID) for PWA notifications
+pyotp>=2.9,<3.0          # TOTP verification for password 2FA
+segno>=1.6,<2.0          # QR code (SVG) for 2FA enrollment

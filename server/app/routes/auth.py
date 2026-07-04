@@ -1,7 +1,11 @@
+import io
 import json
+import secrets
 import uuid
 from datetime import timedelta
 
+import pyotp
+import segno
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +30,14 @@ from webauthn.helpers.structs import (
 from ..config import settings
 from ..db import get_db
 from ..deps import get_current_user, rate_limit_auth
-from ..models import Invite, PasswordCredential, User, WebAuthnCredential, utcnow
+from ..models import (
+    Invite,
+    PasswordCredential,
+    TotpCredential,
+    User,
+    WebAuthnCredential,
+    utcnow,
+)
 from ..models import Session as AuthSession
 from ..schemas import (
     AddPasskeyIn,
@@ -34,11 +45,15 @@ from ..schemas import (
     LoginPasswordIn,
     MeOut,
     PasskeyOut,
+    RecoveryCodesOut,
     RegisterOptionsIn,
     RegisterPasswordIn,
     SessionOut,
     SetPasswordIn,
     TokenOut,
+    TotpCodeIn,
+    TotpSetupOut,
+    TotpStatusOut,
     VerifyIn,
 )
 from ..security import (
@@ -358,6 +373,15 @@ async def login_password(
     ok = verify_password(cred.password_hash if cred else _DUMMY_PASSWORD_HASH, body.password)
     if not (cred and ok):
         raise HTTPException(401, "Incorrect username or password")
+    # Second factor, if the account has confirmed TOTP. Passkey login skips this
+    # (a passkey is already a strong second factor on its own).
+    totp = await db.get(TotpCredential, user.id)
+    if totp is not None and totp.confirmed_at is not None:
+        if not body.code:
+            # Signal the client to prompt for a code, then resubmit.
+            raise HTTPException(401, "mfa_required")
+        if not verify_second_factor(totp, body.code):
+            raise HTTPException(401, "Incorrect authentication code")
     token = await _issue_session(db, user, request)
     await db.commit()
     return TokenOut(token=token, user=MeOut.model_validate(user))
@@ -407,6 +431,110 @@ async def remove_password(
             400, "Add a passkey before removing your password — you'd have no way to sign in."
         )
     await db.delete(cred)
+
+
+# ---- TOTP two-factor (for password logins) ----
+
+
+def verify_second_factor(totp: TotpCredential, code: str | None) -> bool:
+    """True if `code` is a valid current TOTP or an unused recovery code. A
+    matching recovery code is consumed (removed) as a side effect."""
+    code = (code or "").strip().replace(" ", "").replace("-", "").lower()
+    if not code:
+        return False
+    if code.isdigit() and pyotp.TOTP(totp.secret).verify(code, valid_window=1):
+        return True
+    h = hash_token(code)
+    if h in (totp.recovery_codes or []):
+        totp.recovery_codes = [c for c in totp.recovery_codes if c != h]
+        return True
+    return False
+
+
+def _new_recovery_codes(n: int = 10) -> tuple[list[str], list[str]]:
+    """Returns (display_codes, hashes). Persist the hashes; show display once."""
+    raw = [secrets.token_hex(4) for _ in range(n)]  # 8 lowercase hex chars
+    display = [f"{c[:4]}-{c[4:]}" for c in raw]
+    hashes = [hash_token(c) for c in raw]
+    return display, hashes
+
+
+@router.get("/totp", response_model=TotpStatusOut)
+async def totp_status(
+    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> TotpStatusOut:
+    totp = await db.get(TotpCredential, user.id)
+    return TotpStatusOut(enabled=bool(totp and totp.confirmed_at))
+
+
+@router.post("/totp/setup", response_model=TotpSetupOut)
+async def totp_setup(
+    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> TotpSetupOut:
+    existing = await db.get(TotpCredential, user.id)
+    if existing is not None and existing.confirmed_at is not None:
+        raise HTTPException(400, "Two-factor is already on. Turn it off first to re-enroll.")
+    secret = pyotp.random_base32()
+    if existing is not None:
+        existing.secret = secret
+        existing.confirmed_at = None
+        existing.recovery_codes = []
+    else:
+        db.add(TotpCredential(user_id=user.id, secret=secret, recovery_codes=[]))
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user.username, issuer_name="Colloqui")
+    buf = io.BytesIO()
+    segno.make(uri).save(buf, kind="svg", scale=4, border=2)
+    return TotpSetupOut(secret=secret, otpauth_uri=uri, qr_svg=buf.getvalue().decode())
+
+
+@router.post("/totp/confirm", response_model=RecoveryCodesOut)
+async def totp_confirm(
+    body: TotpCodeIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> RecoveryCodesOut:
+    totp = await db.get(TotpCredential, user.id)
+    if totp is None:
+        raise HTTPException(400, "Start two-factor setup first.")
+    if totp.confirmed_at is not None:
+        raise HTTPException(400, "Two-factor is already on.")
+    code = body.code.strip().replace(" ", "")
+    if not (code.isdigit() and pyotp.TOTP(totp.secret).verify(code, valid_window=1)):
+        raise HTTPException(400, "That code didn't match. Check your authenticator app's time and try again.")
+    display, hashes = _new_recovery_codes()
+    totp.confirmed_at = utcnow()
+    totp.recovery_codes = hashes
+    return RecoveryCodesOut(recovery_codes=display)
+
+
+@router.post("/totp/disable", status_code=204)
+async def totp_disable(
+    body: TotpCodeIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    totp = await db.get(TotpCredential, user.id)
+    if totp is None or totp.confirmed_at is None:
+        raise HTTPException(400, "Two-factor isn't on.")
+    if not verify_second_factor(totp, body.code):
+        raise HTTPException(400, "Incorrect authentication code")
+    await db.delete(totp)
+
+
+@router.post("/totp/recovery-codes", response_model=RecoveryCodesOut)
+async def totp_regen_recovery(
+    body: TotpCodeIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> RecoveryCodesOut:
+    totp = await db.get(TotpCredential, user.id)
+    if totp is None or totp.confirmed_at is None:
+        raise HTTPException(400, "Two-factor isn't on.")
+    if not verify_second_factor(totp, body.code):
+        raise HTTPException(400, "Incorrect authentication code")
+    display, hashes = _new_recovery_codes()
+    totp.recovery_codes = hashes
+    return RecoveryCodesOut(recovery_codes=display)
 
 
 @router.get("/me", response_model=MeOut)
