@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -27,6 +27,7 @@ from ..models import (
 from ..schemas import (
     ChannelIn,
     ChannelMoveIn,
+    ChannelOrderIn,
     ChannelOut,
     ChannelUpdateIn,
     DMIn,
@@ -425,7 +426,7 @@ async def my_channels(
             select(Channel)
             .join(ChannelMember, ChannelMember.channel_id == Channel.id)
             .where(ChannelMember.user_id == user.id)
-            .order_by(Channel.created_at)
+            .order_by(Channel.position, Channel.created_at)
         )
     ).all()
     return await channels_out_bulk(db, list(channels), user)
@@ -450,10 +451,41 @@ async def browse_channels(
                 Channel.is_dm == False,  # noqa: E712
                 Channel.id.not_in(mine),
             )
-            .order_by(Channel.created_at)
+            .order_by(Channel.position, Channel.created_at)
         )
     ).all()
     return await channels_out_bulk(db, list(channels), user)
+
+
+@router.put("/channels/order", status_code=204)
+async def reorder_channels(
+    body: ChannelOrderIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    """Set the top-to-bottom order of a space's channels (space manager or admin).
+    `order` is channel ids in the desired order; each gets position = its index."""
+    space = await db.get(Space, body.space_id)
+    if space is None:
+        raise HTTPException(404, "Space not found")
+    if not user.is_admin:
+        member = await db.get(SpaceMember, (space.id, user.id))
+        if member is None or member.role != "manager":
+            raise HTTPException(403, "Only a space manager can reorder its channels")
+    for i, cid in enumerate(body.order):
+        await db.execute(
+            update(Channel)
+            .where(Channel.id == cid, Channel.space_id == space.id)
+            .values(position=i)
+        )
+    await db.flush()
+    # The order is global, so nudge everyone in the space to re-sort their sidebar.
+    member_ids = (
+        await db.scalars(
+            select(SpaceMember.user_id).where(SpaceMember.space_id == space.id)
+        )
+    ).all()
+    await manager.send_to_users(member_ids, {"type": "channels.changed"})
 
 
 @router.post("/channels", response_model=ChannelOut, status_code=201)
@@ -475,8 +507,12 @@ async def create_channel(
     )
     if existing:
         raise HTTPException(409, "A channel with that name already exists in this space")
+    max_pos = await db.scalar(
+        select(func.max(Channel.position)).where(Channel.space_id == body.space_id)
+    )
     channel = Channel(
-        name=name, is_private=body.is_private, space_id=body.space_id, created_by=user.id
+        name=name, is_private=body.is_private, space_id=body.space_id,
+        created_by=user.id, position=(max_pos or 0) + 1,
     )
     db.add(channel)
     await db.flush()
@@ -553,6 +589,10 @@ async def move_channel(
 
     old_members = set(await member_ids(db, channel_id))
     channel.space_id = space.id
+    max_pos = await db.scalar(
+        select(func.max(Channel.position)).where(Channel.space_id == space.id)
+    )
+    channel.position = (max_pos or 0) + 1  # land at the bottom of the new space
     dest_members = set(
         (
             await db.scalars(

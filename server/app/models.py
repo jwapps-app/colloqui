@@ -178,6 +178,8 @@ class Channel(Base):
         ForeignKey("spaces.id", ondelete="CASCADE"), index=True
     )
     is_dm: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Manual sort order within a space (lower = higher up); managers rearrange it.
+    position: Mapped[int] = mapped_column(Integer, default=0)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

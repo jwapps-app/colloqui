@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '112';
+const APP_VERSION = '113';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -3473,7 +3473,50 @@ async function openSpaceManage(sp) {
   $('space-name').disabled = !canManage;
   $('space-save').classList.toggle('hidden', !canManage);
   $('space').classList.remove('hidden');
+  loadSpaceChannels(sp);
   await loadSpaceMembers(sp);
+}
+
+// List the space's channels with up/down reorder controls (managers/admins).
+// The order is global and drives everyone's sidebar.
+function loadSpaceChannels(sp) {
+  const section = $('space-channels-section');
+  const canManage = sp.my_role === 'manager' || me.is_admin;
+  const chans = channels.filter(c => !c.is_dm && c.space_id === sp.id);
+  section.classList.toggle('hidden', !canManage || chans.length === 0);
+  const list = $('space-channel-list');
+  list.innerHTML = '';
+  const ids = chans.map(c => c.id);
+  chans.forEach((c, idx) => {
+    const li = document.createElement('li');
+    const grow = document.createElement('span');
+    grow.className = 'grow';
+    grow.textContent = '# ' + c.name;
+    li.appendChild(grow);
+    const up = document.createElement('button');
+    up.textContent = '↑'; up.title = 'Move up'; up.disabled = idx === 0;
+    up.onclick = () => reorderChannel(sp, ids, idx, -1);
+    li.appendChild(up);
+    const down = document.createElement('button');
+    down.textContent = '↓'; down.title = 'Move down'; down.disabled = idx === chans.length - 1;
+    down.onclick = () => reorderChannel(sp, ids, idx, +1);
+    li.appendChild(down);
+    list.appendChild(li);
+  });
+}
+
+async function reorderChannel(sp, ids, i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= ids.length) return;
+  const arr = ids.slice();
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  try {
+    await api('/channels/order', {
+      method: 'PUT', body: JSON.stringify({ space_id: sp.id, order: arr }),
+    });
+    await loadChannels();   // re-sort the sidebar
+    loadSpaceChannels(sp);  // re-render this list from the new order
+  } catch (e) { appAlert(e.message); }
 }
 
 async function loadSpaceMembers(sp) {

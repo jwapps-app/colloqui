@@ -1128,3 +1128,33 @@ async def test_totp_2fa_flow(client, make_user):
     r = await client.post("/api/v1/auth/login/password",
                           json={"username": "totpuser", "password": pw})
     assert r.status_code == 200
+
+
+async def test_reorder_channels(client, make_user):
+    admin_tok, _ = await make_user("chorder", is_admin=True)
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin_tok),
+                            json={"name": "OrderSpace"})).json()
+    ids = []
+    for n in ("aaa", "bbb", "ccc"):
+        c = (await client.post("/api/v1/channels", headers=auth(admin_tok),
+             json={"name": n, "is_private": False, "space_id": sp["id"]})).json()
+        ids.append(c["id"])
+
+    def order_in_space(payload):
+        return [c["id"] for c in payload
+                if c.get("space_id") == sp["id"] and not c["is_dm"]]
+
+    got = order_in_space((await client.get("/api/v1/channels", headers=auth(admin_tok))).json())
+    assert got == ids  # defaults to creation order
+    rev = ids[::-1]
+    assert (await client.put("/api/v1/channels/order", headers=auth(admin_tok),
+            json={"space_id": sp["id"], "order": rev})).status_code == 204
+    got2 = order_in_space((await client.get("/api/v1/channels", headers=auth(admin_tok))).json())
+    assert got2 == rev  # reordered
+    # a plain space member cannot reorder
+    member_tok, member_id = await make_user("chorder_member")
+    await client.post(f"/api/v1/spaces/{sp['id']}/members", headers=auth(admin_tok),
+                      json={"user_id": str(member_id)})
+    r = await client.put("/api/v1/channels/order", headers=auth(member_tok),
+                         json={"space_id": sp["id"], "order": ids})
+    assert r.status_code == 403

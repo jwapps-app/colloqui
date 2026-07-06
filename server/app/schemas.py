@@ -130,6 +130,11 @@ class ChannelMoveIn(BaseModel):
     space_id: uuid.UUID
 
 
+class ChannelOrderIn(BaseModel):
+    space_id: uuid.UUID
+    order: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
 class ChannelOut(BaseModel):
     id: uuid.UUID
     name: str | None
