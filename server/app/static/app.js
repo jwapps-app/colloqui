@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '114';
+const APP_VERSION = '115';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -4123,3 +4123,31 @@ applyTheme(localStorage.getItem('theme') || 'system');
   }
   $('auth').classList.remove('hidden');
 })();
+
+// ---------- nav icons (match the native iOS SF Symbols) ----------
+// text.bubble (threads), pin (pins), checklist (tasks), bell (notifications),
+// gearshape (settings). Injected by button id and by pane-switch data-pane so
+// there's a single source and no HTML duplication.
+const NAV_ICONS = {
+  threads: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/><path d="M8 9h9"/><path d="M8 13h6"/></svg>',
+  pins: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M15 9.34V6a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1v3.34a2 2 0 0 1-.78 1.58l-3.29 2.56a1 1 0 0 0 .61 1.79h11.9a1 1 0 0 0 .61-1.79l-3.27-2.56A2 2 0 0 1 15 9.34z"/></svg>',
+  tasks: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 2 2 4-4"/><path d="m3 16 2 2 4-4"/><path d="M13 8h8"/><path d="M13 16h8"/></svg>',
+  bell: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
+  settings: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+};
+function initNavIcons() {
+  const byId = {
+    'threads-btn': 'threads', 'pins-btn': 'pins', 'tasks-btn': 'tasks',
+    'notifs-btn': 'bell', 'settings-btn': 'settings',
+  };
+  for (const [id, name] of Object.entries(byId)) {
+    const el = document.getElementById(id);
+    if (el) el.insertAdjacentHTML('afterbegin', NAV_ICONS[name]);  // before any badge
+  }
+  const byPane = { 'threads-inbox': 'threads', 'pins': 'pins', 'tasks': 'tasks', 'notifs': 'bell' };
+  document.querySelectorAll('.pane-switch [data-pane]').forEach(b => {
+    const name = byPane[b.dataset.pane];
+    if (name) { b.textContent = ''; b.insertAdjacentHTML('afterbegin', NAV_ICONS[name]); }
+  });
+}
+initNavIcons();

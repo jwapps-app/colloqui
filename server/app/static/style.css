@@ -719,3 +719,9 @@ main header { padding-top: calc(6px + env(safe-area-inset-top, 0px)); }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px;
   user-select: all;
 }
+
+/* SF-Symbol-style nav icons (match the iOS app): threads/pins/tasks/bell/gear.
+   Stroke uses currentColor so they follow the theme and the dim/active states. */
+.nav-ico { width: 19px; height: 19px; display: block; }
+.pane-switch .nav-ico { width: 22px; height: 22px; }
+#sidebar-top button, #settings-btn { display: inline-flex; align-items: center; justify-content: center; }
