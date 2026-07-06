@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '111';
+const APP_VERSION = '112';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2842,6 +2842,12 @@ function maybeSendTyping() {
 
 // ---------- realtime ----------
 
+// A message affects the open-task count only if it contains a checkbox line, so
+// we can skip the /tasks refetch for ordinary chatter.
+function msgAffectsTasks(m) {
+  return !!(m && m.content && /(^|\n)\[[ xX]\] /.test(m.content));
+}
+
 function handleEvent(data) {
   if (data.type === 'ready') {
     presence.clear();
@@ -2896,7 +2902,9 @@ function handleEvent(data) {
       } else {
         loadChannels();
       }
-      scheduleTaskCount();
+      // A thread reply always changes the threads inbox; refresh task counts
+      // only if it actually carries a checkbox.
+      if (msgAffectsTasks(m)) scheduleTaskCount();
       scheduleThreadCount();
       return;
     }
@@ -2919,7 +2927,9 @@ function handleEvent(data) {
     } else {
       loadChannels();  // a channel we don't have yet
     }
-    scheduleTaskCount();
+    // A plain top-level message only touches task counts if it has a checkbox;
+    // it doesn't affect the threads inbox until it gets a reply.
+    if (msgAffectsTasks(m)) scheduleTaskCount();
   } else if (data.type === 'message.updated') {
     const id = data.message.id;
     if (currentChannel && data.message.channel_id === currentChannel.id) {
@@ -2938,7 +2948,8 @@ function handleEvent(data) {
       if (tp.classList.contains('thread-root-msg')) fresh.classList.add('thread-root-msg');
       tp.replaceWith(fresh);
     }
-    scheduleTaskCount();
+    // An edit only changes task counts if the message has a checkbox.
+    if (msgAffectsTasks(data.message)) scheduleTaskCount();
   } else if (data.type === 'message.deleted') {
     document.querySelectorAll(`.msg[data-id="${data.message.id}"]`).forEach(el => el.remove());
     const c = $('thread-count');

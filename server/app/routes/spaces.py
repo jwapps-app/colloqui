@@ -2,7 +2,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -260,13 +260,14 @@ async def remove_space_member(
     if member is None:
         raise HTTPException(404, "Member not found")
     await db.delete(member)
-    # Drop their membership of every channel in this space.
-    channel_ids = (
-        await db.scalars(select(Channel.id).where(Channel.space_id == space_id))
-    ).all()
-    for channel_id in channel_ids:
-        cm = await db.get(ChannelMember, (channel_id, user_id))
-        if cm is not None:
-            await db.delete(cm)
+    # Drop their membership of every channel in this space in one statement.
+    await db.execute(
+        delete(ChannelMember).where(
+            ChannelMember.user_id == user_id,
+            ChannelMember.channel_id.in_(
+                select(Channel.id).where(Channel.space_id == space_id)
+            ),
+        )
+    )
     await db.flush()
     await manager.send_to_users([user_id], {"type": "channels.changed"})

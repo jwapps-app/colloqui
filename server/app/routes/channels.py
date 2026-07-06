@@ -96,7 +96,10 @@ async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOu
                 )
             )
         ).all()
-        others = [u for u in [await db.get(User, oid) for oid in other_ids] if u]
+        others = (
+            (await db.scalars(select(User).where(User.id.in_(other_ids)))).all()
+            if other_ids else []
+        )
         if len(others) == 1:
             dm_user = UserOut.model_validate(others[0])  # classic 1:1 DM
         elif others:
@@ -450,7 +453,7 @@ async def browse_channels(
             .order_by(Channel.created_at)
         )
     ).all()
-    return [await channel_out(db, c, user) for c in channels]
+    return await channels_out_bulk(db, list(channels), user)
 
 
 @router.post("/channels", response_model=ChannelOut, status_code=201)
