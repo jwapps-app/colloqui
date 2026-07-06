@@ -403,6 +403,7 @@ class ApiKeyOut(BaseModel):
     id: uuid.UUID
     name: str
     user_id: uuid.UUID
+    username: str | None = None  # the user the key acts as (for display)
     created_at: datetime
     last_used_at: datetime | None = None
 

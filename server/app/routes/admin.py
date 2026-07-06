@@ -266,6 +266,7 @@ async def create_api_key(
         id=key.id,
         name=key.name,
         user_id=key.user_id,
+        username=user.username,
         created_at=key.created_at,
         last_used_at=None,
         key=token,
@@ -275,11 +276,26 @@ async def create_api_key(
 @router.get("/api-keys", response_model=list[ApiKeyOut])
 async def list_api_keys(
     db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
-) -> list[ApiKey]:
-    rows = await db.scalars(
-        select(ApiKey).where(ApiKey.revoked_at.is_(None)).order_by(ApiKey.created_at)
-    )
-    return list(rows)
+) -> list[ApiKeyOut]:
+    rows = (
+        await db.execute(
+            select(ApiKey, User.username)
+            .join(User, User.id == ApiKey.user_id)
+            .where(ApiKey.revoked_at.is_(None))
+            .order_by(ApiKey.created_at)
+        )
+    ).all()
+    return [
+        ApiKeyOut(
+            id=k.id,
+            name=k.name,
+            user_id=k.user_id,
+            username=uname,
+            created_at=k.created_at,
+            last_used_at=k.last_used_at,
+        )
+        for k, uname in rows
+    ]
 
 
 @router.delete("/api-keys/{key_id}", status_code=204)

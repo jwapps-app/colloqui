@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '113';
+const APP_VERSION = '114';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -3184,7 +3184,93 @@ async function regenerateCalendarUrl() {
 
 async function openSettings() {
   $('settings').classList.remove('hidden');
-  await Promise.all([loadAdminSpaces(), loadAdminUsers(), loadAdminInvites(), loadAdminChannels()]);
+  $('apikey-out').innerHTML = '';
+  await Promise.all([
+    loadAdminSpaces(), loadAdminUsers(), loadAdminInvites(),
+    loadAdminChannels(), loadApiKeys(),
+  ]);
+}
+
+async function loadApiKeys() {
+  // Populate the "acts as" dropdown (default to the current admin).
+  const sel = $('apikey-user');
+  try {
+    const users = await api('/users');
+    sel.innerHTML = '';
+    for (const u of users) {
+      const o = document.createElement('option');
+      o.value = u.username;
+      o.textContent = `${u.display_name} (@${u.username})`;
+      if (u.id === me.id) o.selected = true;
+      sel.appendChild(o);
+    }
+  } catch {}
+  const list = $('admin-apikey-list');
+  list.innerHTML = '';
+  let keys = [];
+  try { keys = await api('/admin/api-keys'); } catch { return; }
+  if (keys.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'sub';
+    li.textContent = 'No API keys yet.';
+    list.appendChild(li);
+    return;
+  }
+  for (const k of keys) {
+    const li = document.createElement('li');
+    const grow = document.createElement('span');
+    grow.className = 'grow';
+    grow.textContent = k.name;
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = `acts as @${k.username || '?'} · created ${relTime(k.created_at)}`
+      + (k.last_used_at ? ` · last used ${relTime(k.last_used_at)}` : ' · never used');
+    grow.appendChild(sub);
+    li.appendChild(grow);
+    const btn = document.createElement('button');
+    btn.textContent = 'Revoke';
+    btn.onclick = async () => {
+      if (!await appConfirm(`Revoke the API key “${k.name}”? Anything using it stops working immediately.`,
+        { danger: true, okText: 'Revoke' })) return;
+      try { await api(`/admin/api-keys/${k.id}`, { method: 'DELETE' }); await loadApiKeys(); }
+      catch (e) { appAlert(e.message); }
+    };
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+async function createApiKey() {
+  const name = $('apikey-name').value.trim();
+  const username = $('apikey-user').value;
+  if (!name) { appAlert('Give the key a name.'); return; }
+  try {
+    const r = await api('/admin/api-keys', {
+      method: 'POST', body: JSON.stringify({ name, username }),
+    });
+    $('apikey-name').value = '';
+    const out = $('apikey-out');
+    out.innerHTML = '';
+    const p = document.createElement('p');
+    p.innerHTML = "<b>Copy this key now</b> — it won't be shown again.";
+    out.appendChild(p);
+    const row = document.createElement('div');
+    row.className = 'row';
+    const code = document.createElement('input');
+    code.readOnly = true; code.value = r.key; code.className = 'grow';
+    code.onclick = () => code.select();
+    row.appendChild(code);
+    const copy = document.createElement('button');
+    copy.textContent = 'Copy';
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(r.key); }
+      catch { code.select(); document.execCommand('copy'); }
+      toast('Copied');
+    };
+    row.appendChild(copy);
+    out.appendChild(row);
+    await loadApiKeys();
+  } catch (e) { appAlert(e.message); }
 }
 
 async function saveProfile() {
@@ -3833,6 +3919,7 @@ $('new-invite').onclick = newInvite;
 $('new-recovery').onclick = newRecoveryInvite;
 $('new-user-btn').onclick = newUser;
 $('new-space-btn').onclick = newSpace;
+$('apikey-create').onclick = createApiKey;
 $('space-save').onclick = saveSpaceName;
 $('space-add-btn').onclick = addSpaceMember;
 $('space-close').onclick = () => $('space').classList.add('hidden');
