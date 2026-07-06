@@ -428,6 +428,9 @@ class ReminderIn(BaseModel):
     due_at: datetime
     channel_id: uuid.UUID | None = None
     message_id: uuid.UUID | None = None
+    # Client-generated id so reminders created offline replay idempotently on
+    # reconnect (same pattern as messages): a resend returns the existing row.
+    id: uuid.UUID | None = None
 
 
 class ReminderOut(BaseModel):

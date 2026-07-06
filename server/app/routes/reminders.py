@@ -24,6 +24,14 @@ async def create_reminder(
 ) -> Reminder:
     if body.due_at.tzinfo is None:
         raise HTTPException(400, "due_at must include a timezone")
+    # Idempotent replay: a client resending an offline-created reminder (same
+    # client-generated id) gets the existing row back instead of a duplicate.
+    if body.id is not None:
+        existing = await db.get(Reminder, body.id)
+        if existing is not None:
+            if existing.user_id != user.id:
+                raise HTTPException(409, "Reminder id already in use")
+            return existing
     now = utcnow()
     if body.due_at <= now:
         raise HTTPException(400, "Reminder time must be in the future")
@@ -55,6 +63,8 @@ async def create_reminder(
         channel_id=channel_id,
         message_id=body.message_id,
     )
+    if body.id is not None:
+        reminder.id = body.id
     db.add(reminder)
     await db.flush()
     return reminder

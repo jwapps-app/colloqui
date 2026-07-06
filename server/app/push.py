@@ -71,6 +71,10 @@ async def _post_one(
         "badge": badge,
         # Per-token environment: debug builds register sandbox tokens.
         "sandbox": environment == "sandbox",
+        # Run the app's Notification Service Extension on delivery — it dedups
+        # against locally scheduled fallback reminders (harmless otherwise: if
+        # the extension is missing or times out, iOS shows the push as-is).
+        "mutable_content": True,
     }
     if custom:
         payload["custom_data"] = custom
