@@ -149,7 +149,7 @@ button:hover { filter: brightness(1.1); }
 #sidebar-top #threads-btn.active,
 #sidebar-top #pins-btn.active,
 #sidebar-top #tasks-btn.active,
-#sidebar-top #notifs-btn.active { filter: none; opacity: 1; }
+#sidebar-top #notifs-btn.active { filter: none; opacity: 1; color: var(--accent); }
 .section { padding: 20px 12px 6px; }
 .section h3 {
   font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
