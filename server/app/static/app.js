@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '116';
+const APP_VERSION = '117';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -2218,32 +2218,42 @@ function toLocalInput(d) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-function pickWhen() {
+// Resolves to { due: Date, recurrence: string|null } or null if cancelled.
+// `prefill` ({ due, recurrence }) pre-populates the picker when editing.
+function pickWhen(prefill) {
   return new Promise(resolve => {
     whenResolve = resolve;
     const p = n => String(n).padStart(2, '0');
-    const suggestion = new Date(Date.now() + 3600000);
-    suggestion.setMinutes(Math.ceil(suggestion.getMinutes() / 15) * 15, 0, 0);
-    // Keep the default within the 8 AM–6 PM window the dropdown offers.
-    if (suggestion.getHours() < 8) {
-      suggestion.setHours(8, 0, 0, 0);
-    } else if (suggestion.getHours() > 18) {
-      suggestion.setDate(suggestion.getDate() + 1);
-      suggestion.setHours(8, 0, 0, 0);
+    let base;
+    if (prefill && prefill.due) {
+      base = new Date(prefill.due);
+    } else {
+      base = new Date(Date.now() + 3600000);
+      base.setMinutes(Math.ceil(base.getMinutes() / 15) * 15, 0, 0);
+      // Keep the default within the 8 AM–6 PM window the dropdown offers.
+      if (base.getHours() < 8) {
+        base.setHours(8, 0, 0, 0);
+      } else if (base.getHours() > 18) {
+        base.setDate(base.getDate() + 1);
+        base.setHours(8, 0, 0, 0);
+      }
     }
     const now = new Date();
     $('when-date').min = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
-    $('when-date').value =
-      `${suggestion.getFullYear()}-${p(suggestion.getMonth() + 1)}-${p(suggestion.getDate())}`;
-    $('when-hour').value = String(suggestion.getHours());
-    $('when-min').value = String(suggestion.getMinutes());
+    $('when-date').value = `${base.getFullYear()}-${p(base.getMonth() + 1)}-${p(base.getDate())}`;
+    $('when-hour').value = String(base.getHours());
+    $('when-min').value = String(Math.round(base.getMinutes() / 15) * 15 % 60);
+    $('when-repeat').value = (prefill && prefill.recurrence) || '';
     $('when').classList.remove('hidden');
   });
 }
 
 function closeWhen(result) {
   $('when').classList.add('hidden');
-  if (whenResolve) { whenResolve(result); whenResolve = null; }
+  if (whenResolve) {
+    whenResolve(result ? { due: result, recurrence: $('when-repeat').value || null } : null);
+    whenResolve = null;
+  }
 }
 
 const EMOJI_SET = [
@@ -2353,7 +2363,7 @@ function scheduleThreadCount() {
   threadCountTimer = setTimeout(refreshThreadCount, 500);
 }
 
-async function createReminder(text, due, messageId) {
+async function createReminder(text, due, messageId, recurrence) {
   await api('/reminders', {
     method: 'POST',
     body: JSON.stringify({
@@ -2361,29 +2371,48 @@ async function createReminder(text, due, messageId) {
       due_at: due.toISOString(),
       message_id: messageId || null,
       channel_id: !messageId && currentChannel ? currentChannel.id : null,
+      recurrence: recurrence || null,
     }),
   });
   if (!$('info-pane').classList.contains('hidden')) loadInfoPane();
 }
 
 async function remindAboutMessage(m) {
-  const due = await pickWhen();
-  if (!due) return;
+  const r = await pickWhen();
+  if (!r) return;
   try {
     const snippet = m.content ? m.content.slice(0, 120) : (m.file ? m.file.filename : 'message');
-    await createReminder(`${m.sender.display_name}: "${snippet}"`, due, m.id);
-    appAlert(`Reminder set for ${due.toLocaleString()} ✓`);
+    await createReminder(`${m.sender.display_name}: "${snippet}"`, r.due, m.id, r.recurrence);
+    appAlert(`Reminder set for ${r.due.toLocaleString()}${r.recurrence ? ', repeating ' + r.recurrence : ''} ✓`);
   } catch (e) { appAlert(e.message); }
 }
 
 async function addReminderFromPanel() {
   const text = $('rem-text').value.trim();
   if (!text) { $('rem-text').focus(); return; }
-  const due = await pickWhen();
-  if (!due) return;
+  const r = await pickWhen();
+  if (!r) return;
   try {
-    await createReminder(text, due, null);
+    await createReminder(text, r.due, null, r.recurrence);
     $('rem-text').value = '';
+    await loadReminders();
+  } catch (e) { appAlert(e.message); }
+}
+
+async function editReminder(rem) {
+  const text = await appPrompt('Reminder text:', { value: rem.text, okText: 'Next' });
+  if (text === null || !text.trim()) return;
+  const r = await pickWhen({ due: new Date(rem.due_at), recurrence: rem.recurrence });
+  if (!r) return;
+  try {
+    await api(`/reminders/${rem.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        text: text.trim(),
+        due_at: r.due.toISOString(),
+        recurrence: r.recurrence || '',  // "" clears recurrence
+      }),
+    });
     await loadReminders();
   } catch (e) { appAlert(e.message); }
 }
@@ -2405,9 +2434,14 @@ async function loadReminders() {
     grow.textContent = r.text;
     const sub = document.createElement('div');
     sub.className = 'sub';
-    sub.textContent = 'due ' + new Date(r.due_at).toLocaleString();
+    sub.textContent = 'due ' + new Date(r.due_at).toLocaleString()
+      + (r.recurrence ? ' · repeats ' + r.recurrence : '');
     grow.appendChild(sub);
     li.appendChild(grow);
+    const edit = document.createElement('button');
+    edit.textContent = 'Edit';
+    edit.onclick = () => editReminder(r);
+    li.appendChild(edit);
     const btn = document.createElement('button');
     btn.textContent = 'Cancel';
     btn.onclick = async () => {

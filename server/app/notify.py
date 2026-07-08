@@ -1,6 +1,8 @@
 import asyncio
+import calendar
 import logging
 import uuid
+from datetime import datetime, timedelta
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
@@ -15,6 +17,33 @@ from .ws import manager
 log = logging.getLogger("notify")
 
 REMINDER_TICK_SECONDS = 20
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    m = dt.month - 1 + months
+    year = dt.year + m // 12
+    month = m % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])  # clamp e.g. Jan 31 -> Feb
+    return dt.replace(year=year, month=month, day=day)
+
+
+def next_occurrence(due: datetime, recurrence: str | None, now: datetime) -> datetime | None:
+    """The first occurrence strictly after `now` for a recurring reminder, or
+    None for a one-shot. Advancing from the fired time skips any occurrences
+    missed while the server was down (fire once, then jump to the future)."""
+    steps = {
+        "daily": lambda d: d + timedelta(days=1),
+        "weekly": lambda d: d + timedelta(weeks=1),
+        "monthly": lambda d: _add_months(d, 1),
+        "yearly": lambda d: _add_months(d, 12),
+    }
+    step = steps.get(recurrence or "")
+    if step is None:
+        return None
+    nxt = step(due)
+    while nxt <= now:
+        nxt = step(nxt)
+    return nxt
 
 
 async def notify_user(
@@ -81,17 +110,24 @@ async def reminder_loop() -> None:
     while True:
         try:
             await asyncio.sleep(REMINDER_TICK_SECONDS)
+            now = utcnow()
             async with SessionLocal() as db:
                 due = (
                     await db.scalars(
                         select(Reminder)
-                        .where(Reminder.fired_at.is_(None), Reminder.due_at <= utcnow())
+                        .where(Reminder.fired_at.is_(None), Reminder.due_at <= now)
                         .order_by(Reminder.due_at)
                         .limit(100)
                     )
                 ).all()
                 for reminder in due:
-                    reminder.fired_at = utcnow()
+                    # Recurring reminders roll forward and stay pending; one-shots
+                    # are marked fired so they don't fire again.
+                    nxt = next_occurrence(reminder.due_at, reminder.recurrence, now)
+                    if nxt is not None:
+                        reminder.due_at = nxt
+                    else:
+                        reminder.fired_at = now
                     await notify_user(
                         db,
                         reminder.user_id,

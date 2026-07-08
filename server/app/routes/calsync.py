@@ -95,6 +95,7 @@ async def calendar_feed(token: str, db: AsyncSession = Depends(get_db)) -> Respo
             await db.scalars(select(Channel).where(Channel.id.in_(channel_ids)))
         ).all()
     } if channel_ids else {}
+    freq = {"daily": "DAILY", "weekly": "WEEKLY", "monthly": "MONTHLY", "yearly": "YEARLY"}
     for r in reminders:
         channel = channels_by_id.get(r.channel_id) if r.channel_id else None
         where = f"In #{channel.name}" if channel and channel.name else "Colloqui reminder"
@@ -104,6 +105,10 @@ async def calendar_feed(token: str, db: AsyncSession = Depends(get_db)) -> Respo
             f"DTSTAMP:{stamp}",
             f"DTSTART:{_dt(r.due_at)}",
             f"DTEND:{_dt(r.due_at + timedelta(minutes=30))}",
+        ]
+        if r.recurrence in freq:
+            lines.append(f"RRULE:FREQ={freq[r.recurrence]}")
+        lines += [
             _fold(f"SUMMARY:{_esc('⏰ ' + r.text)}"),
             _fold(f"DESCRIPTION:{_esc(where)}"),
             "BEGIN:VALARM",

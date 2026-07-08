@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import Message, Reminder, User, utcnow
-from ..schemas import ReminderIn, ReminderOut
+from ..schemas import ReminderIn, ReminderOut, ReminderUpdateIn
 from .channels import require_member
 
 router = APIRouter(prefix="/api/v1/reminders", tags=["reminders"])
@@ -62,10 +62,40 @@ async def create_reminder(
         due_at=body.due_at,
         channel_id=channel_id,
         message_id=body.message_id,
+        recurrence=body.recurrence,
     )
     if body.id is not None:
         reminder.id = body.id
     db.add(reminder)
+    await db.flush()
+    return reminder
+
+
+@router.patch("/{reminder_id}", response_model=ReminderOut)
+async def update_reminder(
+    reminder_id: uuid.UUID,
+    body: ReminderUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Reminder:
+    reminder = await db.get(Reminder, reminder_id)
+    if reminder is None or reminder.user_id != user.id:
+        raise HTTPException(404, "Reminder not found")
+    if reminder.fired_at is not None:
+        raise HTTPException(400, "That reminder has already fired")
+    if body.text is not None:
+        reminder.text = body.text.strip()
+    if body.due_at is not None:
+        if body.due_at.tzinfo is None:
+            raise HTTPException(400, "due_at must include a timezone")
+        now = utcnow()
+        if body.due_at <= now:
+            raise HTTPException(400, "Reminder time must be in the future")
+        if body.due_at > now + timedelta(days=365):
+            raise HTTPException(400, "Reminders can be at most a year out")
+        reminder.due_at = body.due_at
+    if body.recurrence is not None:
+        reminder.recurrence = body.recurrence or None  # "" clears it
     await db.flush()
     return reminder
 

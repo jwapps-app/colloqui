@@ -294,6 +294,9 @@ class Reminder(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # None = one-shot; else daily|weekly|monthly|yearly. Recurring reminders keep
+    # fired_at NULL and roll due_at forward to the next occurrence when they fire.
+    recurrence: Mapped[str | None] = mapped_column(String(16))
 
 
 class Notification(Base):

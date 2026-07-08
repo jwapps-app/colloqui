@@ -429,11 +429,15 @@ class EventSubCreatedOut(EventSubOut):
     secret: str  # plaintext, shown exactly once
 
 
+RECURRENCE_PATTERN = r"^(daily|weekly|monthly|yearly)$"
+
+
 class ReminderIn(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     due_at: datetime
     channel_id: uuid.UUID | None = None
     message_id: uuid.UUID | None = None
+    recurrence: str | None = Field(default=None, pattern=RECURRENCE_PATTERN)
     # Client-generated id so reminders created offline replay idempotently on
     # reconnect (same pattern as messages): a resend returns the existing row.
     id: uuid.UUID | None = None
@@ -449,6 +453,14 @@ class ReminderOut(BaseModel):
     message_id: uuid.UUID | None
     created_at: datetime
     fired_at: datetime | None
+    recurrence: str | None = None
+
+
+class ReminderUpdateIn(BaseModel):
+    text: str | None = Field(default=None, min_length=1, max_length=500)
+    due_at: datetime | None = None
+    # "" clears recurrence (back to one-shot); a keyword sets it.
+    recurrence: str | None = Field(default=None, pattern=r"^(|daily|weekly|monthly|yearly)$")
 
 
 class NotificationOut(BaseModel):

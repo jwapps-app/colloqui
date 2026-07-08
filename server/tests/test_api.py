@@ -1158,3 +1158,40 @@ async def test_reorder_channels(client, make_user):
     r = await client.put("/api/v1/channels/order", headers=auth(member_tok),
                          json={"space_id": sp["id"], "order": ids})
     assert r.status_code == 403
+
+
+def test_next_occurrence():
+    from datetime import datetime, timedelta, timezone
+    from app.notify import next_occurrence
+    now = datetime(2026, 1, 31, 9, 0, tzinfo=timezone.utc)
+    due = datetime(2026, 1, 31, 9, 0, tzinfo=timezone.utc)
+    assert next_occurrence(due, "daily", now) == datetime(2026, 2, 1, 9, 0, tzinfo=timezone.utc)
+    assert next_occurrence(due, "weekly", now).day == 7
+    m = next_occurrence(due, "monthly", now)
+    assert (m.month, m.day) == (2, 28)  # Jan 31 clamps to Feb 28
+    assert next_occurrence(due, "yearly", now).year == 2027
+    assert next_occurrence(due, None, now) is None
+    # missed while down: fire once, jump to the next future occurrence
+    assert next_occurrence(now - timedelta(days=5), "daily", now) > now
+
+
+async def test_reminder_recurrence_and_edit(client, make_user):
+    from datetime import datetime, timedelta, timezone
+    tok, _ = await make_user("remuser")
+    due = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    r = (await client.post("/api/v1/reminders", headers=auth(tok),
+         json={"text": "standup", "due_at": due, "recurrence": "weekly"})).json()
+    assert r["recurrence"] == "weekly"
+    lst = (await client.get("/api/v1/reminders", headers=auth(tok))).json()
+    assert any(x["id"] == r["id"] and x["recurrence"] == "weekly" for x in lst)
+    upd = (await client.patch(f"/api/v1/reminders/{r['id']}", headers=auth(tok),
+           json={"text": "standup2", "recurrence": "monthly"})).json()
+    assert upd["text"] == "standup2" and upd["recurrence"] == "monthly"
+    upd = (await client.patch(f"/api/v1/reminders/{r['id']}", headers=auth(tok),
+           json={"recurrence": ""})).json()
+    assert upd["recurrence"] is None  # cleared
+    assert (await client.post("/api/v1/reminders", headers=auth(tok),
+            json={"text": "x", "due_at": due, "recurrence": "hourly"})).status_code == 422
+    other_tok, _ = await make_user("remuser2")
+    assert (await client.patch(f"/api/v1/reminders/{r['id']}", headers=auth(other_tok),
+            json={"text": "nope"})).status_code == 404
