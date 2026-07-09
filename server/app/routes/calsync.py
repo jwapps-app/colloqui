@@ -87,18 +87,21 @@ async def calendar_feed(token: str, db: AsyncSession = Depends(get_db)) -> Respo
         "X-WR-CALNAME:Colloqui",
     ]
     stamp = _dt(utcnow())
-    # Bulk-fetch the referenced channels once instead of one query per reminder.
+    # Bulk-fetch just the names of the referenced channels once (only .name is
+    # ever read) instead of one query per reminder.
     channel_ids = {r.channel_id for r in reminders if r.channel_id}
-    channels_by_id = {
-        c.id: c
-        for c in (
-            await db.scalars(select(Channel).where(Channel.id.in_(channel_ids)))
+    name_by_id = {
+        cid: name
+        for cid, name in (
+            await db.execute(
+                select(Channel.id, Channel.name).where(Channel.id.in_(channel_ids))
+            )
         ).all()
     } if channel_ids else {}
     freq = {"daily": "DAILY", "weekly": "WEEKLY", "monthly": "MONTHLY", "yearly": "YEARLY"}
     for r in reminders:
-        channel = channels_by_id.get(r.channel_id) if r.channel_id else None
-        where = f"In #{channel.name}" if channel and channel.name else "Colloqui reminder"
+        name = name_by_id.get(r.channel_id) if r.channel_id else None
+        where = f"In #{name}" if name else "Colloqui reminder"
         lines += [
             "BEGIN:VEVENT",
             f"UID:reminder-{r.id}@colloqui",

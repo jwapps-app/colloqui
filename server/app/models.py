@@ -234,7 +234,7 @@ class Webhook(Base):
 
 class ChannelNotifyPref(Base):
     """Per-user, per-channel notification level. Absence of a row means the
-    default: 'all' for DMs, 'mentions' for channels."""
+    default ('all' — see DEFAULT_NOTIFY_LEVEL in routes/channels.py)."""
 
     __tablename__ = "channel_notify_prefs"
 

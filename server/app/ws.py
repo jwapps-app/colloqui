@@ -131,19 +131,18 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 except (ValueError, TypeError):
                     continue
                 async with SessionLocal() as db:
-                    if await db.get(ChannelMember, (channel_id, user.id)) is None:
-                        continue
-                    others = [
-                        uid
-                        for uid in (
-                            await db.scalars(
-                                select(ChannelMember.user_id).where(
-                                    ChannelMember.channel_id == channel_id
-                                )
+                    members = (
+                        await db.scalars(
+                            select(ChannelMember.user_id).where(
+                                ChannelMember.channel_id == channel_id
                             )
-                        ).all()
-                        if uid != user.id
-                    ]
+                        )
+                    ).all()
+                # One query: derive membership from the member list instead of a
+                # separate db.get, then everyone but the typist gets the ping.
+                if user.id not in members:
+                    continue
+                others = [uid for uid in members if uid != user.id]
                 await manager.send_to_users(
                     others,
                     {

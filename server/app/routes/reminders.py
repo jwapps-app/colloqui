@@ -16,14 +16,23 @@ router = APIRouter(prefix="/api/v1/reminders", tags=["reminders"])
 MAX_PENDING = 100
 
 
+def _validate_due_at(due_at) -> None:
+    """Shared by create and update: tz-aware, in the future, at most a year out."""
+    if due_at.tzinfo is None:
+        raise HTTPException(400, "due_at must include a timezone")
+    now = utcnow()
+    if due_at <= now:
+        raise HTTPException(400, "Reminder time must be in the future")
+    if due_at > now + timedelta(days=365):
+        raise HTTPException(400, "Reminders can be at most a year out")
+
+
 @router.post("", response_model=ReminderOut, status_code=201)
 async def create_reminder(
     body: ReminderIn,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Reminder:
-    if body.due_at.tzinfo is None:
-        raise HTTPException(400, "due_at must include a timezone")
     # Idempotent replay: a client resending an offline-created reminder (same
     # client-generated id) gets the existing row back instead of a duplicate.
     if body.id is not None:
@@ -32,11 +41,7 @@ async def create_reminder(
             if existing.user_id != user.id:
                 raise HTTPException(409, "Reminder id already in use")
             return existing
-    now = utcnow()
-    if body.due_at <= now:
-        raise HTTPException(400, "Reminder time must be in the future")
-    if body.due_at > now + timedelta(days=365):
-        raise HTTPException(400, "Reminders can be at most a year out")
+    _validate_due_at(body.due_at)
 
     pending = await db.scalar(
         select(func.count())
@@ -86,13 +91,7 @@ async def update_reminder(
     if body.text is not None:
         reminder.text = body.text.strip()
     if body.due_at is not None:
-        if body.due_at.tzinfo is None:
-            raise HTTPException(400, "due_at must include a timezone")
-        now = utcnow()
-        if body.due_at <= now:
-            raise HTTPException(400, "Reminder time must be in the future")
-        if body.due_at > now + timedelta(days=365):
-            raise HTTPException(400, "Reminders can be at most a year out")
+        _validate_due_at(body.due_at)
         reminder.due_at = body.due_at
     if body.recurrence is not None:
         reminder.recurrence = body.recurrence or None  # "" clears it

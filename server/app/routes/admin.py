@@ -23,7 +23,6 @@ from ..models import (
     utcnow,
 )
 from ..models import Session as AuthSession
-from ..security import hash_password
 from ..schemas import (
     AdminChannelOut,
     AdminCreateUserIn,
@@ -40,7 +39,7 @@ from ..schemas import (
     InviteIn,
     InviteOut,
 )
-from ..security import hash_token, new_invite_code, new_token
+from ..security import hash_password, hash_token, new_invite_code, new_token
 from ..ws import manager
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])

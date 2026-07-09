@@ -178,11 +178,10 @@ async def thread_meta_for(
     return meta
 
 
-async def thread_participant_ids(
-    db: AsyncSession, root_id: uuid.UUID, exclude_id: uuid.UUID
-) -> set[uuid.UUID]:
-    """User ids who authored the root or any (live) reply in the thread."""
-    rows = await db.scalars(
+def thread_participant_ids_q(root_id: uuid.UUID):
+    """Subquery: user ids who authored the root or any (live) reply in the
+    thread. Composed into the caller's query so it costs no extra round trip."""
+    return (
         select(Message.sender_id)
         .where(
             Message.deleted_at.is_(None),
@@ -190,7 +189,6 @@ async def thread_participant_ids(
         )
         .distinct()
     )
-    return {r for r in rows if r != exclude_id}
 
 
 async def reply_previews_for(
@@ -757,26 +755,30 @@ async def _notify_for_message(
 ) -> None:
     snippet = content[:200] if content else "(attachment)"
     if channel.is_dm:
-        other_id = await db.scalar(
-            select(ChannelMember.user_id).where(
-                ChannelMember.channel_id == channel.id,
-                ChannelMember.user_id != sender.id,
+        # ALL other members — group DMs (3+) exist, and `scalar` here notified
+        # exactly one arbitrary participant while the rest heard nothing.
+        other_ids = (
+            await db.scalars(
+                select(ChannelMember.user_id).where(
+                    ChannelMember.channel_id == channel.id,
+                    ChannelMember.user_id != sender.id,
+                )
             )
-        )
-        # Online users see the message arrive live; notify only the absent.
-        if (
-            other_id
-            and not manager.is_online(other_id)
-            and await _notify_level(db, channel, other_id) != "muted"
-        ):
-            await notify_user(
-                db,
-                other_id,
-                "dm",
-                f"💬 New message from {sender.display_name}",
-                snippet,
-                {"channel_id": str(channel.id)},
-            )
+        ).all()
+        for other_id in other_ids:
+            # Online users see the message arrive live; notify only the absent.
+            if (
+                not manager.is_online(other_id)
+                and await _notify_level(db, channel, other_id) != "muted"
+            ):
+                await notify_user(
+                    db,
+                    other_id,
+                    "dm",
+                    f"💬 New message from {sender.display_name}",
+                    snippet,
+                    {"channel_id": str(channel.id)},
+                )
         return
     mentioned = set(re.findall(r"@([a-z0-9_]{3,32})", content.lower()))
     # Walk members, honoring each one's per-channel level: muted → nothing,
@@ -905,39 +907,39 @@ async def send_message(
         await _broadcast_thread_meta(db, channel_id, thread_root_id)
         # Notify everyone in the thread (its author + prior repliers), except
         # the sender and anyone @mentioned here (they get a mention instead).
-        participants = await thread_participant_ids(db, thread_root_id, user.id)
-        if participants:
-            mentioned = set(re.findall(r"@([a-z0-9_]{3,32})", content.lower()))
-            prows = (
-                await db.execute(
-                    select(User.id, User.username, ChannelNotifyPref.level)
-                    .outerjoin(
-                        ChannelNotifyPref,
-                        and_(
-                            ChannelNotifyPref.channel_id == channel_id,
-                            ChannelNotifyPref.user_id == User.id,
-                        ),
-                    )
-                    .where(
-                        User.id.in_(participants),
-                        User.disabled == False,  # noqa: E712
-                    )
+        # Participants resolve as a subquery, so this is a single round trip.
+        mentioned = set(re.findall(r"@([a-z0-9_]{3,32})", content.lower()))
+        prows = (
+            await db.execute(
+                select(User.id, User.username, ChannelNotifyPref.level)
+                .outerjoin(
+                    ChannelNotifyPref,
+                    and_(
+                        ChannelNotifyPref.channel_id == channel_id,
+                        ChannelNotifyPref.user_id == User.id,
+                    ),
                 )
-            ).all()
-            snippet = content[:200] if content else "(attachment)"
-            for uid, uname, level in prows:
-                if level == "muted":
-                    continue
-                if uname.lower() in mentioned:
-                    continue
-                await notify_user(
-                    db,
-                    uid,
-                    "thread",
-                    f"💬 {user.display_name} replied in a thread",
-                    snippet,
-                    {"channel_id": str(channel_id), "root_id": str(thread_root_id)},
+                .where(
+                    User.id.in_(thread_participant_ids_q(thread_root_id)),
+                    User.id != user.id,
+                    User.disabled == False,  # noqa: E712
                 )
+            )
+        ).all()
+        snippet = content[:200] if content else "(attachment)"
+        for uid, uname, level in prows:
+            if level == "muted":
+                continue
+            if uname.lower() in mentioned:
+                continue
+            await notify_user(
+                db,
+                uid,
+                "thread",
+                f"💬 {user.display_name} replied in a thread",
+                snippet,
+                {"channel_id": str(channel_id), "root_id": str(thread_root_id)},
+            )
     await _notify_for_message(db, channel, user, content)
     return out
 
@@ -1150,12 +1152,16 @@ async def delete_message(
         if not (message.webhook_name and can_manage):
             raise HTTPException(403, "You can only delete your own messages")
     message.deleted_at = utcnow()
+    blob_to_unlink: Path | None = None
     if message.file_id:
         file = await db.get(File, message.file_id)
         message.file_id = None
         if file:
             await db.delete(file)
-            (Path(settings.upload_dir) / str(file.id)).unlink(missing_ok=True)
+            # Unlink AFTER the transaction commits (get_db commits post-
+            # response) — deleting the blob here left DB rows pointing at a
+            # missing file if the commit failed.
+            blob_to_unlink = Path(settings.upload_dir) / str(file.id)
     await record_change(db, message)
     await broadcast(
         db,
@@ -1178,3 +1184,6 @@ async def delete_message(
     if message.thread_root_id is not None:
         await db.flush()
         await _broadcast_thread_meta(db, message.channel_id, message.thread_root_id)
+    if blob_to_unlink is not None:
+        await db.commit()
+        blob_to_unlink.unlink(missing_ok=True)

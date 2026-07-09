@@ -79,14 +79,6 @@ select:focus { border-color: var(--accent); }
   font-size: 12px; color: var(--accent);
 }
 #edit-banner button { padding: 1px 9px; font-size: 12px; }
-#reply-banner {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
-  font-size: 12px; color: var(--muted);
-  border-left: 2px solid var(--accent); padding-left: 8px;
-}
-#reply-banner-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#reply-banner-text b { color: var(--text); }
-#reply-banner button { padding: 1px 8px; font-size: 12px; flex-shrink: 0; }
 .reply-preview {
   display: flex; gap: 6px; align-items: baseline; cursor: pointer;
   font-size: 12px; color: var(--muted); margin: 1px 0 3px;
@@ -163,7 +155,6 @@ button:hover { filter: brightness(1.1); }
   padding: 9px 12px; border-radius: 8px; cursor: pointer;
   display: flex; align-items: center; gap: 8px; margin-bottom: 1px;
 }
-#admin-section button { margin: 0 0 8px 10px; }
 .section li .label {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -297,7 +288,6 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
 }
 .task-item .task-text { flex: 1; cursor: pointer; min-width: 0; }
 .task-item .task-text:hover { color: var(--accent); }
-.task-item .task-where { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .msg.flash { animation: flashbg 1.6s ease-out; border-radius: 8px; }
 @keyframes flashbg {
   0%, 30% { background: rgba(var(--accent-rgb), .22); }

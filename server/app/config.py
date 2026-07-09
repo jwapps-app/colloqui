@@ -25,14 +25,6 @@ class Settings(BaseSettings):
     push_relay_api_key: str = ""   # the relay's API_KEY_COLLOQUI — secret, env only
     apns_topic: str = "com.jworthington.colloqui"  # bundle id the relay routes on
 
-    # Legacy direct-to-Apple APNs settings — unused now that push goes through the
-    # relay. Kept so existing env files don't error; safe to remove later.
-    apns_key: str = ""
-    apns_key_path: str = ""
-    apns_key_id: str = ""
-    apns_team_id: str = ""
-    apns_sandbox: bool = False
-
     # Web Push (PWA notifications) via VAPID. All optional — web push is a silent
     # no-op until these are set. Keys are base64url (generate them with the
     # snippet in the README). We sign with our own keys and POST straight to the

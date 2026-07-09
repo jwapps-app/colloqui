@@ -90,17 +90,20 @@ async def notify_user(
     # session raced the request's commit and shipped a stale/too-low count —
     # which is why the app-icon badge often didn't update until you opened the
     # app and it recomputed.
-    badge = await db.scalar(
-        select(func.count())
-        .select_from(Notification)
-        .where(Notification.user_id == user_id, Notification.read_at.is_(None))
-    )
-    # Push to the user's other surfaces (both inbox items and transient
-    # "all"-level alerts). Each is a no-op unless configured; fire-and-forget,
-    # never blocks here. APNs reaches the native iOS app; web push reaches
-    # installed PWAs (incl. iOS) when they're backgrounded or closed.
-    push.schedule(user_id, title, body, data, badge or 0)
-    webpush.schedule(user_id, title, body, data, badge or 0)
+    # Skip the count entirely when no push transport is configured — otherwise
+    # a message to an N-member channel costs N pointless COUNT queries.
+    if push.push_enabled() or webpush.web_push_enabled():
+        badge = await db.scalar(
+            select(func.count())
+            .select_from(Notification)
+            .where(Notification.user_id == user_id, Notification.read_at.is_(None))
+        )
+        # Push to the user's other surfaces (both inbox items and transient
+        # "all"-level alerts). Each is a no-op unless configured; fire-and-forget,
+        # never blocks here. APNs reaches the native iOS app; web push reaches
+        # installed PWAs (incl. iOS) when they're backgrounded or closed.
+        push.schedule(user_id, title, body, data, badge or 0)
+        webpush.schedule(user_id, title, body, data, badge or 0)
     return notification
 
 

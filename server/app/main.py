@@ -35,7 +35,7 @@ async def migrate_existing_to_default_space() -> None:
     """One-time: if channels exist but no space does, create a default 'Main'
     space, enroll all users, and move existing channels into it. Idempotent —
     skips once any space exists."""
-    from sqlalchemy import func, select, update
+    from sqlalchemy import select, update
 
     from .db import SessionLocal
     from .models import Channel, Space, SpaceMember, User

@@ -37,9 +37,10 @@ from ..schemas import (
 )
 
 
-def default_notify_level(channel: Channel) -> str:
-    return "all"
 from ..ws import manager
+
+# What members hear before they pick a per-channel preference.
+DEFAULT_NOTIFY_LEVEL = "all"
 
 router = APIRouter(prefix="/api/v1", tags=["channels"])
 
@@ -182,7 +183,7 @@ async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOu
         )
     )
     pref = await db.get(ChannelNotifyPref, (channel.id, me.id))
-    notify_level = pref.level if pref else default_notify_level(channel)
+    notify_level = pref.level if pref else DEFAULT_NOTIFY_LEVEL
     return ChannelOut(
         id=channel.id,
         name=channel.name,
@@ -213,7 +214,7 @@ async def set_notify_pref(
 ) -> ChannelOut:
     channel = await require_member(db, channel_id, user)
     pref = await db.get(ChannelNotifyPref, (channel_id, user.id))
-    if body.level == default_notify_level(channel):
+    if body.level == DEFAULT_NOTIFY_LEVEL:
         # Storing the default would just be noise — drop any explicit row.
         if pref is not None:
             await db.delete(pref)
@@ -411,7 +412,7 @@ async def channels_out_bulk(
                 reminder_count=reminder_by.get(c.id, 0),
                 pinned_count=pinned_by.get(c.id, 0),
                 thread_count=thread_by.get(c.id, 0),
-                notify_level=pref_by.get(c.id) or default_notify_level(c),
+                notify_level=pref_by.get(c.id) or DEFAULT_NOTIFY_LEVEL,
             )
         )
     return out
@@ -547,9 +548,13 @@ async def update_channel(
     if body.name is not None:
         name = body.name.strip()
         if name != channel.name:
+            # Same-space uniqueness, matching create_channel — without the
+            # space filter a rename 409'd if the name existed in ANY space.
             existing = await db.scalar(
                 select(Channel).where(
-                    Channel.name == name, Channel.is_dm == False  # noqa: E712
+                    Channel.name == name,
+                    Channel.space_id == channel.space_id,
+                    Channel.is_dm == False,  # noqa: E712
                 )
             )
             if existing:
@@ -762,28 +767,36 @@ async def open_dm(
 ) -> ChannelOut:
     """One target → a 1:1 DM; several → a group DM. Reuses an existing DM whose
     member set is exactly the same people."""
-    targets = []
-    for uid in set(body.user_ids):
-        if uid == user.id:
-            continue
-        u = await db.get(User, uid)
-        if u is None or u.disabled:
-            raise HTTPException(404, "User not found")
-        targets.append(u)
-    if not targets:
+    target_ids = {uid for uid in body.user_ids if uid != user.id}
+    if not target_ids:
         raise HTTPException(400, "Pick at least one other person")
-    target_set = {user.id} | {t.id for t in targets}
-
-    # Reuse an existing DM whose members are exactly this set.
-    my_dm_ids = (
+    targets = (
         await db.scalars(
-            select(ChannelMember.channel_id)
-            .join(Channel, Channel.id == ChannelMember.channel_id)
-            .where(Channel.is_dm == True, ChannelMember.user_id == user.id)  # noqa: E712
+            select(User).where(User.id.in_(target_ids), User.disabled == False)  # noqa: E712
         )
     ).all()
-    for cid in my_dm_ids:
-        if set(await member_ids(db, cid)) == target_set:
+    if len(targets) != len(target_ids):
+        raise HTTPException(404, "User not found")
+    target_set = {user.id} | target_ids
+
+    # Reuse an existing DM whose members are exactly this set: fetch every
+    # member row of every DM the caller is in with one grouped query, then
+    # compare sets in Python (was one query per DM).
+    my_dm_ids = select(ChannelMember.channel_id).join(
+        Channel, Channel.id == ChannelMember.channel_id
+    ).where(Channel.is_dm == True, ChannelMember.user_id == user.id)  # noqa: E712
+    rows = (
+        await db.execute(
+            select(ChannelMember.channel_id, ChannelMember.user_id).where(
+                ChannelMember.channel_id.in_(my_dm_ids)
+            )
+        )
+    ).all()
+    members_by_dm: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for cid, mid in rows:
+        members_by_dm.setdefault(cid, set()).add(mid)
+    for cid, member_set in members_by_dm.items():
+        if member_set == target_set:
             channel = await db.get(Channel, cid)
             return await channel_out(db, channel, user)
 

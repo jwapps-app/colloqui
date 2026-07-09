@@ -19,6 +19,21 @@ from .models import EventSubscription, utcnow
 
 log = logging.getLogger("colloqui.webhooks_out")
 
+# Strong refs to scheduled dispatch tasks — the event loop holds tasks only
+# weakly, so an unreferenced create_task() can be GC'd before it delivers.
+_inflight: set[asyncio.Task] = set()
+
+# One shared client: reuses connections instead of a fresh TCP+TLS handshake
+# per delivery (same pattern as push.py's relay client).
+_client: httpx.AsyncClient | None = None
+
+
+def _http_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=5)
+    return _client
+
 
 async def _deliver(url: str, secret: str, body: bytes, event_type: str) -> None:
     delivery_id = str(uuid.uuid4())
@@ -29,16 +44,16 @@ async def _deliver(url: str, secret: str, body: bytes, event_type: str) -> None:
         "X-Colloqui-Delivery": delivery_id,
         "X-Colloqui-Signature": f"sha256={sig}",
     }
-    async with httpx.AsyncClient(timeout=5) as client:
-        for attempt in range(2):  # one retry, then give up
-            try:
-                r = await client.post(url, content=body, headers=headers)
-                if r.status_code < 500:
-                    return
-            except Exception:
-                pass
-            if attempt == 0:
-                await asyncio.sleep(1)
+    client = _http_client()
+    for attempt in range(2):  # one retry, then give up
+        try:
+            r = await client.post(url, content=body, headers=headers)
+            if r.status_code < 500:
+                return
+        except Exception:
+            pass
+        if attempt == 0:
+            await asyncio.sleep(1)
     log.warning("outgoing webhook %s -> %s failed after retries", event_type, url)
 
 
@@ -76,4 +91,6 @@ def dispatch_event(event_type: str, data: dict) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return  # no event loop (e.g. a sync script); nothing to schedule onto
-    loop.create_task(_dispatch(event_type, data))
+    task = loop.create_task(_dispatch(event_type, data))
+    _inflight.add(task)
+    task.add_done_callback(_inflight.discard)

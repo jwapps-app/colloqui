@@ -35,6 +35,10 @@ log = logging.getLogger("webpush")
 # keeps web push cleanly off.
 _keys: dict | None = None
 
+# Strong refs to in-flight delivery tasks so the loop's weak task-holding can't
+# GC them mid-send (see push.py for the same guard).
+_inflight: set[asyncio.Task] = set()
+
 
 def _key_file() -> Path:
     """Where the auto-managed keypair is persisted — on the data volume, so it
@@ -140,42 +144,54 @@ async def _deliver(
     keys = _keys
     if keys is None:
         return
+    # Short session: snapshot the subscriptions and let the connection go —
+    # holding it across the network fan-out starved the pool under load (the
+    # exact starvation push.py already fixed for APNs tokens).
     async with SessionLocal() as db:
-        subs = (
-            await db.scalars(
-                select(PushSubscription).where(PushSubscription.user_id == user_id)
-            )
-        ).all()
-        if not subs:
-            return
-        payload = json.dumps(
-            {"title": title, "body": body, "data": data or {}, "badge": badge}
-        )
-        dead: list[str] = []
-        for sub in subs:
-            info = {
-                "endpoint": sub.endpoint,
-                "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
-            }
-            try:
-                await asyncio.to_thread(
-                    webpush,
-                    subscription_info=info,
-                    data=payload,
-                    vapid_private_key=keys["vapid"],
-                    # Fresh dict per call: pywebpush mutates it (adds aud/exp).
-                    vapid_claims={"sub": keys["subject"]},
-                    ttl=86400,
+        subs = [
+            (s.endpoint, s.p256dh, s.auth)
+            for s in (
+                await db.scalars(
+                    select(PushSubscription).where(PushSubscription.user_id == user_id)
                 )
-            except WebPushException as e:
-                status = getattr(getattr(e, "response", None), "status_code", None)
-                if status in (404, 410):
-                    dead.append(sub.endpoint)
-                else:
-                    log.warning("web push failed (%s): %s", status, e)
-            except Exception:
-                log.exception("web push send error")
-        if dead:
+            ).all()
+        ]
+    if not subs:
+        return
+    payload = json.dumps(
+        {"title": title, "body": body, "data": data or {}, "badge": badge}
+    )
+
+    async def _send(endpoint: str, p256dh: str, auth: str) -> str | None:
+        """Deliver to one subscription; return its endpoint if it's dead (to
+        be pruned), else None."""
+        info = {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
+        try:
+            await asyncio.to_thread(
+                webpush,
+                subscription_info=info,
+                data=payload,
+                vapid_private_key=keys["vapid"],
+                # Fresh dict per call: pywebpush mutates it (adds aud/exp).
+                vapid_claims={"sub": keys["subject"]},
+                ttl=86400,
+            )
+        except WebPushException as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (404, 410):
+                return endpoint
+            log.warning("web push failed (%s): %s", status, e)
+        except Exception:
+            log.exception("web push send error")
+        return None
+
+    # Fan the sends out concurrently — a user with 2-3 PWA installs otherwise
+    # paid that many push-service round-trips back to back (mirrors push.py).
+    results = await asyncio.gather(*[_send(*sub) for sub in subs])
+    dead = [endpoint for endpoint in results if endpoint]
+    if dead:
+        # Re-open a session only for the prune, after the network work is done.
+        async with SessionLocal() as db:
             await db.execute(
                 delete(PushSubscription).where(PushSubscription.endpoint.in_(dead))
             )
@@ -202,7 +218,11 @@ def schedule(
     into the caller."""
     if not web_push_enabled():
         return
-    asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))
+    # Keep a strong ref — the loop holds tasks only weakly, so an unreferenced
+    # create_task() can be GC'd mid-flight and the push silently never arrives.
+    task = asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))
+    _inflight.add(task)
+    task.add_done_callback(_inflight.discard)
 
 
 async def send_test(user_id: uuid.UUID) -> dict:

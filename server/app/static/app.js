@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '118';
+const APP_VERSION = '119';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -176,7 +176,6 @@ let channels = [];
 let currentChannel = null;
 let manageSpaceId = null;
 let editingMessageId = null;
-let replyingTo = null;  // { id, sender_name, snippet }
 let threadRootId = null;  // id of the thread currently open in the thread pane
 let sock = null;
 const presence = new Map();  // user_id -> 'online' | 'away' | 'offline'
@@ -444,7 +443,6 @@ function signOutLocal() {
   closePreview();
   closeInfoPane();
   closeThread();
-  cancelReply();
   $('app').classList.add('hidden');
   $('auth').classList.remove('hidden');
 }
@@ -854,7 +852,6 @@ function updateChannelHeader() {
 
 async function selectChannel(ch) {
   exitEditMode();
-  cancelReply();
   closeThread();
   closeMention();
   currentChannel = ch;
@@ -934,7 +931,6 @@ async function jumpToMessage(channelId, messageId) {
 
 function clearChannelView() {
   exitEditMode();
-  cancelReply();
   closeThread();
   currentChannel = null;
   $('messages').innerHTML = '';
@@ -1718,14 +1714,13 @@ function toast(msg) {
   _toastTimer = setTimeout(() => el.classList.remove('show'), 1600);
 }
 
-async function copyMessageText(m) {
-  const text = m.content || '';
-  if (!text) return;
+async function copyText(text) {
+  // Shared clipboard write with a fallback for non-secure contexts (e.g. http
+  // LAN testing). Returns whether the copy succeeded.
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
     } else {
-      // Fallback for non-secure contexts (e.g. http LAN testing).
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
@@ -1734,8 +1729,13 @@ async function copyMessageText(m) {
       document.execCommand('copy');
       ta.remove();
     }
-    toast('Copied');
-  } catch { toast('Could not copy'); }
+    return true;
+  } catch { return false; }
+}
+
+async function copyMessageText(m) {
+  if (!m.content) return;
+  toast(await copyText(m.content) ? 'Copied' : 'Could not copy');
 }
 
 // Mobile message-action popup (the "⋯" menu). Built from the same action
@@ -2086,11 +2086,9 @@ async function sendMessage(e) {
   }
   clearEditor();
   clearDraft(currentChannel.id);
-  const reply_to_id = replyingTo ? replyingTo.id : null;
-  cancelReply();
   try {
     await api(`/channels/${currentChannel.id}/messages`, {
-      method: 'POST', body: JSON.stringify({ content, reply_to_id }),
+      method: 'POST', body: JSON.stringify({ content }),
     });
   } catch (err) { $('send-input').textContent = content; appAlert(err.message); }
 }
@@ -2125,7 +2123,6 @@ function fillEditor(text) {
 
 function editMessage(m) {
   if (!currentChannel) return;
-  cancelReply();  // can't reply and edit at once
   editingMessageId = m.id;
   setComposerEnabled(true);
   fillEditor(m.content);
@@ -2142,25 +2139,6 @@ function exitEditMode() {
   $('edit-banner').classList.add('hidden');
   $('send-btn').textContent = 'Send';
   $('attach-btn').disabled = !currentChannel;
-}
-
-function startReply(m) {
-  exitEditMode();  // can't edit and reply at once
-  replyingTo = { id: m.id, sender_name: m.sender.display_name,
-                 snippet: m.content ? m.content.slice(0, 80) : (m.file ? m.file.filename : 'message') };
-  const text = $('reply-banner-text');
-  text.innerHTML = '';
-  const b = document.createElement('b');
-  b.textContent = '↩ Replying to ' + replyingTo.sender_name + ': ';
-  text.appendChild(b);
-  text.appendChild(document.createTextNode(replyingTo.snippet));
-  $('reply-banner').classList.remove('hidden');
-  $('send-input').focus();
-}
-
-function cancelReply() {
-  replyingTo = null;
-  $('reply-banner').classList.add('hidden');
 }
 
 async function togglePin(m) {
@@ -2196,11 +2174,9 @@ async function uploadAttachment() {
     const fd = new FormData();
     fd.append('upload', file);
     const meta = await api(`/channels/${currentChannel.id}/files`, { method: 'POST', body: fd });
-    const reply_to_id = replyingTo ? replyingTo.id : null;
-    cancelReply();
     await api(`/channels/${currentChannel.id}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content: serializeEditor(), file_id: meta.id, reply_to_id }),
+      body: JSON.stringify({ content: serializeEditor(), file_id: meta.id }),
     });
     clearEditor();
     clearDraft(currentChannel.id);
@@ -2212,11 +2188,6 @@ async function uploadAttachment() {
 
 // Promise-based "when?" picker: quick options + native datetime control.
 let whenResolve = null;
-
-function toLocalInput(d) {
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-}
 
 // Resolves to { due: Date, recurrence: string|null } or null if cancelled.
 // `prefill` ({ due, recurrence }) pre-populates the picker when editing.
@@ -2273,28 +2244,34 @@ function renderReactions(container, messageId, reactions) {
     pill.onclick = () => toggleReaction(messageId, r.emoji);
     container.appendChild(pill);
   }
-  // "+" reveals an inline emoji strip: hover on desktop, tap on touch.
+  // "+" reveals an inline emoji strip: hover on desktop, tap on touch. The 40
+  // buttons are built lazily on first hover/tap — building them eagerly cost
+  // ~4,000 hidden nodes per 100-message channel load.
   const zone = document.createElement('span');
   zone.className = 'react-zone';
   const add = document.createElement('button');
   add.className = 'reaction reaction-add';
   add.textContent = '+';
   add.title = 'Add reaction';
-  add.onclick = e => { e.stopPropagation(); zone.classList.toggle('open'); };
-  zone.appendChild(add);
   const strip = document.createElement('span');
   strip.className = 'emoji-strip';
-  for (const emoji of EMOJI_SET) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = emoji;
-    b.onclick = e => {
-      e.stopPropagation();
-      zone.classList.remove('open');
-      toggleReaction(messageId, emoji);
-    };
-    strip.appendChild(b);
-  }
+  const buildStrip = () => {
+    if (strip.childElementCount) return;
+    for (const emoji of EMOJI_SET) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = emoji;
+      b.onclick = e => {
+        e.stopPropagation();
+        zone.classList.remove('open');
+        toggleReaction(messageId, emoji);
+      };
+      strip.appendChild(b);
+    }
+  };
+  zone.addEventListener('pointerenter', buildStrip);
+  add.onclick = e => { e.stopPropagation(); buildStrip(); zone.classList.toggle('open'); };
+  zone.appendChild(add);
   zone.appendChild(strip);
   container.appendChild(zone);
 }
@@ -2611,6 +2588,20 @@ async function setupPushSubscription() {
 
 // ---------- open tasks ----------
 
+// Group items (tasks, pins) under a heading per channel, first-seen order.
+function groupByChannel(items) {
+  const groups = new Map();
+  for (const it of items) {
+    if (!groups.has(it.channel_id)) {
+      groups.set(it.channel_id, {
+        label: it.is_dm ? 'Direct message' : '# ' + it.channel_name, items: [],
+      });
+    }
+    groups.get(it.channel_id).items.push(it);
+  }
+  return groups;
+}
+
 async function openTasks() {
   $('tasks').classList.remove('hidden');
   await loadTasks();
@@ -2630,18 +2621,7 @@ async function loadTasks() {
     return;
   }
 
-  // Group tasks under a heading per channel (first-seen order).
-  const groups = new Map();
-  for (const t of tasks) {
-    if (!groups.has(t.channel_id)) {
-      groups.set(t.channel_id, {
-        label: t.is_dm ? 'Direct message' : '# ' + t.channel_name, items: [],
-      });
-    }
-    groups.get(t.channel_id).items.push(t);
-  }
-
-  for (const [, group] of groups) {
+  for (const [, group] of groupByChannel(tasks)) {
     const heading = document.createElement('li');
     heading.className = 'task-group';
     heading.textContent = group.label;
@@ -2703,17 +2683,7 @@ async function loadPins() {
     list.appendChild(li);
     return;
   }
-  // Group under a heading per channel (first-seen order).
-  const groups = new Map();
-  for (const p of pins) {
-    if (!groups.has(p.channel_id)) {
-      groups.set(p.channel_id, {
-        label: p.is_dm ? 'Direct message' : '# ' + p.channel_name, items: [],
-      });
-    }
-    groups.get(p.channel_id).items.push(p);
-  }
-  for (const [, group] of groups) {
+  for (const [, group] of groupByChannel(pins)) {
     const heading = document.createElement('li');
     heading.className = 'task-group';
     heading.textContent = group.label;
@@ -2760,7 +2730,7 @@ async function loadThreadsInbox() {
   if (!threads.length) {
     const li = document.createElement('li');
     li.className = 'sub';
-    li.textContent = "No active threads. Reply to a message with 💬 to start one.";
+    li.textContent = "No active threads. Use a message's reply action to start one.";
     list.appendChild(li);
     return;
   }
@@ -2945,8 +2915,12 @@ function handleEvent(data) {
     if (currentChannel && m.channel_id === currentChannel.id) {
       typers.delete(m.sender.id); renderTyping();
       renderMessage(m);
-      const box = $('messages');
-      box.scrollTop = box.scrollHeight;
+      // Follow the conversation only if the user is already at (or near) the
+      // bottom, or it's their own message — don't yank them out of history.
+      if (stickBottom || (me && m.sender.id === me.id)) {
+        const box = $('messages');
+        box.scrollTop = box.scrollHeight;
+      }
       if (ch) {
         ch.message_count = (ch.message_count || 0) + 1;
         ch.recent_count = (ch.recent_count || 0) + 1;
@@ -2968,13 +2942,7 @@ function handleEvent(data) {
     const id = data.message.id;
     if (currentChannel && data.message.channel_id === currentChannel.id) {
       const el = document.querySelector(`#messages .msg[data-id="${id}"]`);
-      if (el) {
-        const next = el.nextSibling;
-        el.remove();
-        renderMessage(data.message);
-        const fresh = document.querySelector(`#messages .msg[data-id="${id}"]`);
-        if (next && fresh) $('messages').insertBefore(fresh, next);
-      }
+      if (el) el.replaceWith(buildMessageNode(data.message));
     }
     const tp = document.querySelector(`#thread-content .msg[data-id="${id}"]`);
     if (tp) {
@@ -3202,8 +3170,8 @@ async function removePassword() {
 async function copyCalendarUrl() {
   const url = $('calendar-url').value;
   if (!url) return;
-  try { await navigator.clipboard.writeText(url); appAlert('Calendar link copied.'); }
-  catch { $('calendar-url').select(); document.execCommand('copy'); }
+  if (await copyText(url)) appAlert('Calendar link copied.');
+  else $('calendar-url').select();  // let the user copy by hand
 }
 
 async function regenerateCalendarUrl() {
@@ -3297,9 +3265,8 @@ async function createApiKey() {
     const copy = document.createElement('button');
     copy.textContent = 'Copy';
     copy.onclick = async () => {
-      try { await navigator.clipboard.writeText(r.key); }
-      catch { code.select(); document.execCommand('copy'); }
-      toast('Copied');
+      if (await copyText(r.key)) toast('Copied');
+      else code.select();  // let the user copy by hand
     };
     row.appendChild(copy);
     out.appendChild(row);
@@ -3946,7 +3913,6 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !$('dialog').classList.contains('hidden')) resolveDialog(false);
 });
 $('edit-cancel').onclick = exitEditMode;
-$('reply-cancel').onclick = cancelReply;
 $('search-form').onsubmit = runSearch;
 $('new-dm').onclick = newDm;
 $('new-invite').onclick = newInvite;

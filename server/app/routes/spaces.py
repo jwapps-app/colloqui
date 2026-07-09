@@ -46,15 +46,30 @@ async def add_to_space(
     """Add a user to a space and auto-join its public channels."""
     if await db.get(SpaceMember, (space_id, user_id)) is None:
         db.add(SpaceMember(space_id=space_id, user_id=user_id, role=role))
-    public = await db.scalars(
-        select(Channel.id).where(
-            Channel.space_id == space_id,
-            Channel.is_private == False,  # noqa: E712
-            Channel.is_dm == False,  # noqa: E712
+    public = (
+        await db.scalars(
+            select(Channel.id).where(
+                Channel.space_id == space_id,
+                Channel.is_private == False,  # noqa: E712
+                Channel.is_dm == False,  # noqa: E712
+            )
         )
+    ).all()
+    if not public:
+        return
+    # One query for the memberships the user already has (was one get per channel).
+    already = set(
+        (
+            await db.scalars(
+                select(ChannelMember.channel_id).where(
+                    ChannelMember.channel_id.in_(public),
+                    ChannelMember.user_id == user_id,
+                )
+            )
+        ).all()
     )
-    for channel_id in public.all():
-        if await db.get(ChannelMember, (channel_id, user_id)) is None:
+    for channel_id in public:
+        if channel_id not in already:
             db.add(ChannelMember(channel_id=channel_id, user_id=user_id))
 
 
