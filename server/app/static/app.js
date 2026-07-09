@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '117';
+const APP_VERSION = '118';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -1760,7 +1760,7 @@ function openMsgMenu(anchor, acts) {
     const item = document.createElement('button');
     const ic = document.createElement('span');
     ic.className = 'mm-icon';
-    ic.textContent = a.icon;
+    ic.innerHTML = svgIcon(a.icon, 'act-ico');
     item.appendChild(ic);
     item.appendChild(document.createTextNode(a.label));
     item.onclick = () => { closeMsgMenu(); a.fn(); };
@@ -1822,25 +1822,25 @@ function buildMessageNode(m, opts) {
   // icons on desktop, and collapsed into a tap-to-open "⋯" menu on mobile (so
   // they never wrap onto a second row on a narrow screen).
   const acts = [
-    { icon: '💬', label: opts.inThread ? 'Reply in this thread' : 'Reply in thread', fn: () => openThread(m) },
+    { icon: 'reply', label: opts.inThread ? 'Reply in this thread' : 'Reply in thread', fn: () => openThread(m) },
   ];
-  if (m.content) acts.push({ icon: '📋', label: 'Copy text', fn: () => copyMessageText(m) });
-  acts.push({ icon: '📌', label: m.pinned ? 'Unpin' : 'Pin', cls: m.pinned ? 'active-pin' : '', fn: () => togglePin(m) });
-  acts.push({ icon: '⏰', label: 'Remind me about this', fn: () => remindAboutMessage(m) });
+  if (m.content) acts.push({ icon: 'copy', label: 'Copy text', fn: () => copyMessageText(m) });
+  acts.push({ icon: 'pin', label: m.pinned ? 'Unpin' : 'Pin', cls: m.pinned ? 'active-pin' : '', fn: () => togglePin(m) });
+  acts.push({ icon: 'clock', label: 'Remind me about this', fn: () => remindAboutMessage(m) });
   if (me && m.sender.id === me.id) {
     if (!/^\[( |x)\] /i.test(m.content)) {
-      acts.push({ icon: '☑', label: 'Convert to task', fn: () => convertToTask(m) });
+      acts.push({ icon: 'checklist', label: 'Convert to task', fn: () => convertToTask(m) });
     }
-    acts.push({ icon: '✎', label: 'Edit', fn: () => editMessage(m) });
-    acts.push({ icon: '🗑', label: 'Delete', fn: () => deleteMessage(m) });
+    acts.push({ icon: 'pencil', label: 'Edit', fn: () => editMessage(m) });
+    acts.push({ icon: 'trash', label: 'Delete', fn: () => deleteMessage(m) });
   } else if (m.sender.username === 'webhook' && currentChannel && canManage(currentChannel)) {
-    acts.push({ icon: '🗑', label: 'Delete', fn: () => deleteMessage(m) });
+    acts.push({ icon: 'trash', label: 'Delete', fn: () => deleteMessage(m) });
   }
   const actions = document.createElement('span');
   actions.className = 'actions';
   for (const a of acts) {
     const b = document.createElement('button');
-    b.textContent = a.icon;
+    b.innerHTML = svgIcon(a.icon, 'act-ico');
     b.title = a.label;
     if (a.cls) b.classList.add(a.cls);
     b.onclick = a.fn;
@@ -4158,30 +4158,43 @@ applyTheme(localStorage.getItem('theme') || 'system');
   $('auth').classList.remove('hidden');
 })();
 
-// ---------- nav icons (match the native iOS SF Symbols) ----------
-// text.bubble (threads), pin (pins), checklist (tasks), bell (notifications),
-// gearshape (settings). Injected by button id and by pane-switch data-pane so
-// there's a single source and no HTML duplication.
-const NAV_ICONS = {
-  threads: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/><path d="M8 9h9"/><path d="M8 13h6"/></svg>',
-  pins: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M15 9.34V6a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1v3.34a2 2 0 0 1-.78 1.58l-3.29 2.56a1 1 0 0 0 .61 1.79h11.9a1 1 0 0 0 .61-1.79l-3.27-2.56A2 2 0 0 1 15 9.34z"/></svg>',
-  tasks: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 2 2 4-4"/><path d="m3 16 2 2 4-4"/><path d="M13 8h8"/><path d="M13 16h8"/></svg>',
-  bell: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
-  settings: '<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+// ---------- icons (match the native iOS SF Symbols) ----------
+// One source of truth. Each entry is the inner SVG of a 24x24 stroke glyph;
+// svgIcon() wraps it. Used for the sidebar/header/footer chrome and the
+// per-message action menu so the whole app shares one icon language.
+const ICON_PATHS = {
+  threads: '<path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/><path d="M8 9h9"/><path d="M8 13h6"/>',
+  pin: '<path d="M12 17v5"/><path d="M15 9.34V6a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1v3.34a2 2 0 0 1-.78 1.58l-3.29 2.56a1 1 0 0 0 .61 1.79h11.9a1 1 0 0 0 .61-1.79l-3.27-2.56A2 2 0 0 1 15 9.34z"/>',
+  checklist: '<path d="m3 8 2 2 4-4"/><path d="m3 16 2 2 4-4"/><path d="M13 8h8"/><path d="M13 16h8"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  members: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  pencil: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+  paperclip: '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>',
+  trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  reply: '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
 };
+function svgIcon(name, cls) {
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ''}</svg>`;
+}
 function initNavIcons() {
   const byId = {
-    'threads-btn': 'threads', 'pins-btn': 'pins', 'tasks-btn': 'tasks',
-    'notifs-btn': 'bell', 'settings-btn': 'settings',
+    'threads-btn': 'threads', 'pins-btn': 'pin', 'tasks-btn': 'checklist',
+    'notifs-btn': 'bell', 'settings-btn': 'gear',
+    'info-btn': 'info', 'members-btn': 'members',
+    'edit-channel-btn': 'pencil', 'attach-btn': 'paperclip',
   };
   for (const [id, name] of Object.entries(byId)) {
     const el = document.getElementById(id);
-    if (el) el.insertAdjacentHTML('afterbegin', NAV_ICONS[name]);  // before any badge
+    if (el) el.insertAdjacentHTML('afterbegin', svgIcon(name, 'nav-ico'));  // before any badge
   }
-  const byPane = { 'threads-inbox': 'threads', 'pins': 'pins', 'tasks': 'tasks', 'notifs': 'bell' };
+  const byPane = { 'threads-inbox': 'threads', 'pins': 'pin', 'tasks': 'checklist', 'notifs': 'bell' };
   document.querySelectorAll('.pane-switch [data-pane]').forEach(b => {
     const name = byPane[b.dataset.pane];
-    if (name) { b.textContent = ''; b.insertAdjacentHTML('afterbegin', NAV_ICONS[name]); }
+    if (name) { b.textContent = ''; b.insertAdjacentHTML('afterbegin', svgIcon(name, 'nav-ico')); }
   });
 }
 initNavIcons();

@@ -725,3 +725,8 @@ main header { padding-top: calc(6px + env(safe-area-inset-top, 0px)); }
 .nav-ico { width: 19px; height: 19px; display: block; }
 .pane-switch .nav-ico { width: 22px; height: 22px; }
 #sidebar-top button, #settings-btn { display: inline-flex; align-items: center; justify-content: center; }
+
+/* Message-action + chrome icons (share the stroke style with the nav icons) */
+.act-ico { width: 16px; height: 16px; display: block; }
+.msg .actions button { display: inline-flex; align-items: center; justify-content: center; }
+#channel-actions button, #attach-btn { display: inline-flex; align-items: center; justify-content: center; }
