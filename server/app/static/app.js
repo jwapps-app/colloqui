@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '119';
+const APP_VERSION = '120';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -782,6 +782,16 @@ function openChannelFromLink(channelId, rootId) {
   selectChannel(ch).then(() => { if (rootId) openThread({ id: rootId }); });
 }
 
+// Collapsed spaces persist per device (a view preference, not server state).
+let collapsedSpaces = new Set(JSON.parse(localStorage.getItem('collapsedSpaces') || '[]'));
+
+function toggleSpaceCollapsed(spaceId) {
+  if (collapsedSpaces.has(spaceId)) collapsedSpaces.delete(spaceId);
+  else collapsedSpaces.add(spaceId);
+  localStorage.setItem('collapsedSpaces', JSON.stringify([...collapsedSpaces]));
+  renderChannels();
+}
+
 function renderChannels() {
   const container = $('spaces-container');
   const dmList = $('dm-list');
@@ -795,14 +805,53 @@ function renderChannels() {
   }
 
   for (const sp of spaces) {
+    const inSpace = bySpace.get(sp.id) || [];
+    const collapsed = collapsedSpaces.has(sp.id);
     const section = document.createElement('div');
-    section.className = 'section';
+    section.className = 'section' + (collapsed ? ' collapsed' : '');
     const h3 = document.createElement('h3');
+    // Chevron + name toggle the collapse; the counts and "+" stay separate.
+    const toggle = document.createElement('span');
+    toggle.className = 'space-toggle';
+    toggle.title = collapsed ? 'Expand space' : 'Collapse space';
+    toggle.insertAdjacentHTML('afterbegin', svgIcon('chevron', 'space-chevron'));
     const name = document.createElement('span');
     name.className = 'space-name';
     name.textContent = sp.name;
-    h3.appendChild(name);
+    toggle.appendChild(name);
+    toggle.onclick = () => toggleSpaceCollapsed(sp.id);
+    h3.appendChild(toggle);
     const btns = document.createElement('span');
+    btns.className = 'space-side';
+    if (collapsed) {
+      // Rolled-up totals across the space's channels, shown the same way the
+      // channel rows show theirs. Muted channels keep their unreads to themselves.
+      const tasks = inSpace.reduce((n, c) => n + (c.open_task_count || 0), 0);
+      const recent = inSpace.reduce((n, c) => n + (c.recent_count || 0), 0);
+      const unread = inSpace.reduce(
+        (n, c) => n + (c.notify_level === 'muted' ? 0 : (c.unread_count || 0)), 0);
+      if (tasks > 0) {
+        const chip = document.createElement('span');
+        chip.className = 'task-chip';
+        chip.textContent = '☑ ' + tasks;
+        chip.title = `${tasks} open task(s) in this space`;
+        btns.appendChild(chip);
+      }
+      if (recent > 0) {
+        const count = document.createElement('span');
+        count.className = 'msg-count';
+        count.textContent = recent;
+        count.title = `${recent} message(s) in the last 7 days`;
+        btns.appendChild(count);
+      }
+      if (unread > 0) {
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = unread > 99 ? '99+' : unread;
+        badge.title = `${unread} unread`;
+        btns.appendChild(badge);
+      }
+    }
     // Space management (rename / add members) lives in Settings → Spaces now,
     // so the sidebar header only carries the "add channel" action.
     const add = document.createElement('button');
@@ -812,9 +861,11 @@ function renderChannels() {
     btns.appendChild(add);
     h3.appendChild(btns);
     section.appendChild(h3);
-    const ul = document.createElement('ul');
-    for (const ch of (bySpace.get(sp.id) || [])) ul.appendChild(channelLi(ch));
-    section.appendChild(ul);
+    if (!collapsed) {
+      const ul = document.createElement('ul');
+      for (const ch of inSpace) ul.appendChild(channelLi(ch));
+      section.appendChild(ul);
+    }
     container.appendChild(section);
   }
   updateActionIcons();
@@ -1738,8 +1789,9 @@ async function copyMessageText(m) {
   toast(await copyText(m.content) ? 'Copied' : 'Could not copy');
 }
 
-// Mobile message-action popup (the "⋯" menu). Built from the same action
-// descriptors the desktop inline icons use.
+// Mobile message-action popup, opened by long-pressing a message. Built from
+// the same action descriptors the desktop inline icons use, topped with a
+// scrollable quick-reaction emoji row (iOS style).
 function closeMsgMenu() {
   const m = document.getElementById('msg-menu');
   if (m) m.remove();
@@ -1751,11 +1803,23 @@ function onMsgMenuDown(e) {
   const menu = document.getElementById('msg-menu');
   if (menu && !menu.contains(e.target)) closeMsgMenu();
 }
-function openMsgMenu(anchor, acts) {
+function openMsgMenu(anchor, acts, m) {
   closeMsgMenu();
   const menu = document.createElement('div');
   menu.id = 'msg-menu';
   menu.className = 'msg-menu';
+  if (m) {
+    const row = document.createElement('div');
+    row.className = 'mm-emoji';
+    for (const emoji of EMOJI_SET) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = emoji;
+      b.onclick = () => { closeMsgMenu(); toggleReaction(m.id, emoji); };
+      row.appendChild(b);
+    }
+    menu.appendChild(row);
+  }
   for (const a of acts) {
     const item = document.createElement('button');
     const ic = document.createElement('span');
@@ -1819,8 +1883,8 @@ function buildMessageNode(m, opts) {
   }
 
   // One source of truth for the per-message actions: rendered as inline hover
-  // icons on desktop, and collapsed into a tap-to-open "⋯" menu on mobile (so
-  // they never wrap onto a second row on a narrow screen).
+  // icons on desktop, and collapsed into a long-press menu on mobile (so they
+  // never wrap onto a second row on a narrow screen).
   const acts = [
     { icon: 'reply', label: opts.inThread ? 'Reply in this thread' : 'Reply in thread', fn: () => openThread(m) },
   ];
@@ -1848,15 +1912,35 @@ function buildMessageNode(m, opts) {
   }
   meta.appendChild(actions);
 
-  // Touch/narrow clients open the action menu by tapping the message (except on
-  // interactive bits: links, images, reactions, reply/thread jumps, buttons).
-  // Only true wide hover-capable desktops skip it and use the inline hover icons
-  // instead; an iPad PWA is wide but has no hover, so it gets the menu too.
-  div.addEventListener('click', (e) => {
+  // Touch/narrow clients open the action menu with a LONG-PRESS (like iOS),
+  // not a tap — so the tap that dismisses one menu can never pop another. The
+  // menu leads with a quick-reaction emoji row. Only true wide hover-capable
+  // desktops skip it and use the inline hover icons; an iPad PWA is wide but
+  // has no hover, so it gets the long-press menu too.
+  let lpTimer = null, lpX = 0, lpY = 0, lpFired = false;
+  const lpCancel = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  div.addEventListener('pointerdown', (e) => {
     if (!isNarrow() && hasHover()) return;
     if (e.target.closest('a, button, input, label, img, .reply-preview, .thread-summary')) return;
-    openMsgMenu(div, acts);
+    lpX = e.clientX; lpY = e.clientY; lpFired = false;
+    lpTimer = setTimeout(() => {
+      lpTimer = null; lpFired = true;
+      if (navigator.vibrate) navigator.vibrate(10);  // little haptic tick where supported
+      openMsgMenu(div, acts, m);
+    }, 450);
   });
+  // Any movement (scrolling), release, or cancel before the timer = not a long-press.
+  div.addEventListener('pointermove', (e) => {
+    if (lpTimer && Math.hypot(e.clientX - lpX, e.clientY - lpY) > 10) lpCancel();
+  });
+  div.addEventListener('pointerup', lpCancel);
+  div.addEventListener('pointercancel', lpCancel);
+  // Swallow the click that trails a completed long-press so it can't hit a link.
+  div.addEventListener('click', (e) => {
+    if (lpFired) { lpFired = false; e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  // Keep the browser's own long-press context menu out of the way on touch.
+  div.addEventListener('contextmenu', (e) => { if (!hasHover()) e.preventDefault(); });
   main.appendChild(meta);
 
   if (m.reply_to) {
@@ -4142,6 +4226,7 @@ const ICON_PATHS = {
   clock: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>',
   trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
   reply: '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
+  chevron: '<polyline points="9 18 15 12 9 6"/>',
 };
 function svgIcon(name, cls) {
   return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ''}</svg>`;

@@ -149,6 +149,19 @@ button:hover { filter: brightness(1.1); }
 }
 .section h3 button { padding: 1px 9px; font-size: 13px; border-radius: 6px; }
 .section h3 .space-name { font-weight: 700; color: var(--text); letter-spacing: 0; text-transform: none; font-size: 13px; }
+/* Collapsible space headers: chevron + name toggle; the right side carries the
+   rolled-up count chips (collapsed only) and the "+" button. */
+.section h3 .space-toggle {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  flex: 1; min-width: 0; overflow: hidden;
+}
+.space-chevron {
+  width: 13px; height: 13px; flex-shrink: 0; color: var(--muted);
+  transform: rotate(90deg); transition: transform .15s;
+}
+.section.collapsed .space-chevron { transform: none; }
+.section h3 .space-side { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.section.collapsed { padding-bottom: 0; }
 #spaces-container .section { padding-top: 14px; }
 .section ul { list-style: none; }
 .section li {
@@ -555,15 +568,28 @@ input[type="datetime-local"] { color-scheme: dark; }
 .msg .actions { visibility: hidden; margin-left: 8px; }
 .msg .actions button { font-size: 11px; padding: 1px 7px; margin-left: 4px; }
 /* Touch devices (incl. iPad PWA, which is wider than the mobile breakpoint)
-   have no hover to reveal these, so hide them and use the tap menu instead. */
-@media (hover: none) { .msg .actions { display: none; } }
-/* The mobile "⋯" action menu */
+   have no hover to reveal these, so hide them and use the long-press menu.
+   Also disable the OS text-selection callout so a long-press means "menu",
+   not "select" — Copy lives in the menu. */
+@media (hover: none) {
+  .msg .actions { display: none; }
+  .msg { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+}
+/* The long-press action menu */
 .msg-menu {
   position: fixed; z-index: 1000;
   background: var(--panel); border: 1px solid var(--line);
-  border-radius: 10px; padding: 4px; min-width: 190px;
+  border-radius: 10px; padding: 4px; min-width: 190px; max-width: 270px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
   display: flex; flex-direction: column;
+}
+/* Quick-reaction row at the top of the menu: one scrollable strip. */
+.msg-menu .mm-emoji {
+  display: flex; gap: 2px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  padding: 2px 2px 6px; margin-bottom: 4px; border-bottom: 1px solid var(--line);
+}
+.msg-menu .mm-emoji button {
+  width: auto; flex: 0 0 auto; font-size: 20px; padding: 5px 7px; border-radius: 8px;
 }
 .msg-menu button {
   display: flex; align-items: center; gap: 10px; width: 100%;
