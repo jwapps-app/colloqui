@@ -101,6 +101,25 @@ CSP = (
 )
 
 
+# JSON bodies are tiny (a message, a login); nothing legitimate needs more than
+# this. Caps the unauthenticated attack surface (e.g. /verify) against oversized
+# or deeply-nested JSON. Multipart file uploads set their own content-type and
+# are size-limited in the upload handler, so they're exempt.
+_MAX_JSON_BODY = 256 * 1024
+
+
+@app.middleware("http")
+async def limit_json_body(request: Request, call_next):
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/json"):
+        clen = request.headers.get("content-length")
+        if clen is not None and clen.isdigit() and int(clen) > _MAX_JSON_BODY:
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"detail": "Request body too large"}, status_code=413)
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)

@@ -40,6 +40,9 @@ async def calendar_regenerate(
 
 
 def _esc(text: str) -> str:
+    # Strip other control chars (incl. a lone CR) first so they can't forge a
+    # content-line break; then escape the iCal specials.
+    text = "".join(ch for ch in text if ch == "\n" or ch >= " ")
     return (
         text.replace("\\", "\\\\").replace(";", "\\;")
         .replace(",", "\\,").replace("\n", "\\n")

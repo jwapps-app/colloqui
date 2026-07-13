@@ -395,8 +395,23 @@ async def password_status(
     return {"has_password": cred is not None}
 
 
+async def _revoke_other_sessions(request: Request, db: AsyncSession, user_id) -> None:
+    """Revoke all of the user's sessions except the one making this request.
+    Call after any credential change so a leaked or stolen bearer token can't
+    outlive the change that was meant to lock it out."""
+    current_hash = hash_token(
+        request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    )
+    await db.execute(
+        update(AuthSession)
+        .where(AuthSession.user_id == user_id, AuthSession.token_hash != current_hash)
+        .values(revoked=True)
+    )
+
+
 @router.post("/password")
 async def set_password(
+    request: Request,
     body: SetPasswordIn,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -411,12 +426,15 @@ async def set_password(
         cred.password_hash = hash_password(body.password)
     else:
         db.add(PasswordCredential(user_id=user.id, password_hash=hash_password(body.password)))
+    await _revoke_other_sessions(request, db, user.id)
     return {"ok": True}
 
 
 @router.delete("/password", status_code=204)
 async def remove_password(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> None:
     cred = await db.get(PasswordCredential, user.id)
     if cred is None:
@@ -431,6 +449,7 @@ async def remove_password(
             400, "Add a passkey before removing your password — you'd have no way to sign in."
         )
     await db.delete(cred)
+    await _revoke_other_sessions(request, db, user.id)
 
 
 # ---- TOTP two-factor (for password logins) ----
@@ -453,8 +472,10 @@ def verify_second_factor(totp: TotpCredential, code: str | None) -> bool:
 
 def _new_recovery_codes(n: int = 10) -> tuple[list[str], list[str]]:
     """Returns (display_codes, hashes). Persist the hashes; show display once."""
-    raw = [secrets.token_hex(4) for _ in range(n)]  # 8 lowercase hex chars
-    display = [f"{c[:4]}-{c[4:]}" for c in raw]
+    # 12 hex chars = 48 bits each: a standing 2FA-bypass secret, so give it real
+    # entropy (the old 8-char/32-bit codes were thin).
+    raw = [secrets.token_hex(6) for _ in range(n)]
+    display = [f"{c[:4]}-{c[4:8]}-{c[8:]}" for c in raw]
     hashes = [hash_token(c) for c in raw]
     return display, hashes
 
@@ -609,6 +630,7 @@ async def add_passkey_options(
 
 @router.post("/passkeys/verify", response_model=PasskeyOut)
 async def add_passkey_verify(
+    request: Request,
     body: VerifyIn,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -628,12 +650,14 @@ async def add_passkey_verify(
         label=pending["label"],
     )
     db.add(cred)
+    await _revoke_other_sessions(request, db, user.id)
     await db.commit()
     return _passkey_out(cred)
 
 
 @router.delete("/passkeys/{credential_id}", status_code=204)
 async def delete_passkey(
+    request: Request,
     credential_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -653,6 +677,7 @@ async def delete_passkey(
     if count <= 1:
         raise HTTPException(400, "You can't remove your only passkey")
     await db.delete(cred)
+    await _revoke_other_sessions(request, db, user.id)
 
 
 # ---------- session management ----------

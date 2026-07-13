@@ -1,13 +1,13 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
-from ..deps import get_current_user
+from ..deps import client_ip, get_current_user
 from ..models import Channel, ChannelMember, Message, User, Webhook, utcnow
 from ..schemas import WebhookCreatedOut, WebhookIn, WebhookOut, WebhookPostIn
 from ..security import RateLimiter, hash_token, new_token
@@ -20,6 +20,9 @@ public_router = APIRouter(tags=["webhooks"])
 
 # Cap each webhook's posting rate (per-process, sliding window).
 _hook_limiter = RateLimiter(limit=30, window_seconds=60)
+# Cap ingest attempts per client IP BEFORE token lookup, so the public,
+# unauthenticated endpoint can't be used to hammer the DB with bad tokens.
+_hook_ip_limiter = RateLimiter(limit=60, window_seconds=60)
 
 
 async def require_channel_manager(
@@ -94,11 +97,14 @@ async def delete_webhook(
 
 @public_router.post("/hooks/{token}", status_code=201)
 async def ingest(
+    request: Request,
     token: str,
     body: WebhookPostIn,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Public ingest endpoint — auth is the secret token in the URL."""
+    if not _hook_ip_limiter.allow(client_ip(request)):
+        raise HTTPException(429, "Too many requests")
     hook = await db.scalar(
         select(Webhook).where(Webhook.token_hash == hash_token(token))
     )

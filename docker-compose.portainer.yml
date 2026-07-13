@@ -14,7 +14,7 @@ services:
     image: ${COLLOQUI_IMAGE:-ghcr.io/jwapps-app/colloqui:latest}
     restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql+asyncpg://app:${POSTGRES_PASSWORD}@10.213.0.10:5432/app
+      - DATABASE_URL=postgresql+asyncpg://app:${POSTGRES_PASSWORD:?set a strong POSTGRES_PASSWORD}@10.213.0.10:5432/app
       - RP_ID=${RP_ID:-jjrrr.co}
       - ORIGIN=${ORIGIN:-https://colloqui.jjrrr.co}
       - DEV_MODE=${DEV_MODE:-false}

@@ -36,6 +36,25 @@ def extract_urls(text: str, limit: int = 3) -> list[str]:
     return seen
 
 
+def _ip_is_public(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    # Unwrap IPv4-mapped IPv6 (::ffff:a.b.c.d) so a mapped private/loopback
+    # address is still caught (is_private doesn't unwrap on all versions).
+    if getattr(ip, "ipv4_mapped", None) is not None:
+        ip = ip.ipv4_mapped
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
 async def _host_is_public(host: str) -> bool:
     if not host:
         return False
@@ -43,21 +62,10 @@ async def _host_is_public(host: str) -> bool:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)
     except (socket.gaierror, UnicodeError, OSError):
         return False
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            return False
-    return True
+    # Every resolved address must be public. This is a fast pre-connect reject;
+    # the authoritative check is on the actual peer IP after connecting (below),
+    # which is what closes the DNS-rebinding TOCTOU.
+    return bool(infos) and all(_ip_is_public(info[4][0]) for info in infos)
 
 
 def _meta_map(head: str) -> dict[str, str]:
@@ -97,6 +105,13 @@ async def fetch_metadata(url: str) -> dict | None:
                 if not await _host_is_public(parsed.hostname or ""):
                     return None
                 async with client.stream("GET", url) as resp:
+                    # Validate the IP we ACTUALLY connected to, not just the one
+                    # we pre-resolved — a rebinding attacker can return a public
+                    # IP to _host_is_public's lookup and a private one to httpx's.
+                    stream = resp.extensions.get("network_stream")
+                    peer = stream.get_extra_info("server_addr") if stream else None
+                    if peer and not _ip_is_public(peer[0]):
+                        return None
                     if resp.is_redirect:
                         loc = resp.headers.get("location")
                         if not loc:

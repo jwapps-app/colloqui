@@ -10,6 +10,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .deps import user_from_token
 from .models import ChannelMember, User, utcnow
+from .security import RateLimiter
 
 router = APIRouter()
 
@@ -78,13 +79,31 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+# Cap unauthenticated connection attempts per client IP so an attacker can't
+# flood sockets (each held open through the auth grace period). Generous enough
+# for a real client's reconnect storms.
+_ws_connect_limiter = RateLimiter(limit=60, window_seconds=60)
+
+
+def _ws_client_ip(ws: WebSocket) -> str:
+    cf = ws.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.split(",")[0].strip()
+    return ws.client.host if ws.client else "unknown"
+
+
 @router.websocket("/api/v1/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     # The session token arrives in the first message rather than the URL,
     # so it never lands in access logs.
     await ws.accept()
+    if not _ws_connect_limiter.allow(_ws_client_ip(ws)):
+        await ws.close(code=4429)  # too many connection attempts
+        return
     try:
-        first = await asyncio.wait_for(ws.receive_json(), timeout=10)
+        # Short auth grace: a real client sends its token immediately. Keeping it
+        # brief bounds how long an unauthenticated socket can squat a connection.
+        first = await asyncio.wait_for(ws.receive_json(), timeout=3)
     except Exception:
         await ws.close(code=4401)
         return

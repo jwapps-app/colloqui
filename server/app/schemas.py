@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 USERNAME_PATTERN = r"^[A-Za-z0-9_]{3,32}$"
 
@@ -414,7 +415,9 @@ class ApiKeyCreatedOut(ApiKeyOut):
 
 class EventSubIn(BaseModel):
     url: str = Field(min_length=1, max_length=500)
-    events: list[str] | None = Field(default=None, max_length=20)
+    events: list[Annotated[str, StringConstraints(max_length=64)]] | None = Field(
+        default=None, max_length=20
+    )
 
 
 class EventSubOut(BaseModel):
