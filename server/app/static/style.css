@@ -392,6 +392,16 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
   flex: 1; overflow: auto; padding: 14px;
   display: flex; flex-direction: column;
 }
+#viewer-expand {
+  display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px;
+}
+#viewer-expand .nav-ico { width: 17px; height: 17px; }
+/* Full-window overlay for the preview pane (the "expand" toggle). The ✕ still
+   closes back to Colloqui; the collapse button (or Escape) returns to the pane. */
+#app > #preview-pane.expanded {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  z-index: 1000; border-left: none;
+}
 #viewer-content img { max-width: 100%; border-radius: 8px; margin: 0 auto; }
 /* PDF pages, rasterized by PDF.js — stack them full-width with a little gap. */
 #viewer-content .pdf-page {

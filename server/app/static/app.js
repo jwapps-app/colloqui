@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '121';
+const APP_VERSION = '122';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -1203,8 +1203,12 @@ async function downloadFile(file) {
 }
 
 function closePreview() {
-  $('preview-pane').classList.add('hidden');
+  const pane = $('preview-pane');
+  pane.classList.add('hidden');
+  pane.classList.remove('expanded');
+  updateExpandIcon(false);
   $('viewer-content').innerHTML = '';
+  if (_pdfDoc) { _pdfDoc.destroy(); _pdfDoc = null; }
 }
 
 // ---------- channel info pane (tasks + reminders) ----------
@@ -1539,27 +1543,20 @@ async function loadInfoPane() {
 // file was opened meanwhile (rendering is async and page-by-page).
 let _viewerGen = 0;
 let _pdfWorkerSet = false;
+let _pdfDoc = null;   // current PDF.js doc, kept so expand/collapse can re-render crisply
 const PDF_MAX_PAGES = 50;
 
-// Render a PDF blob to stacked <canvas> pages via the self-hosted PDF.js. This
-// works in every browser (incl. WebKit/iOS, which can't frame a blob PDF) and
-// keeps the document inside the preview pane.
-async function renderPdf(entry, box, gen) {
-  if (!window.pdfjsLib) throw new Error('PDF viewer failed to load');
-  if (!_pdfWorkerSet) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js?v=121';
-    _pdfWorkerSet = true;
-  }
-  const data = await entry.blob.arrayBuffer();
-  if (gen !== _viewerGen) return;
-  const pdf = await pdfjsLib.getDocument({ data }).promise;
-  if (gen !== _viewerGen) { pdf.destroy(); return; }
+// Draw a PDF's pages as stacked <canvas>es sized to the current pane width.
+// Split out from renderPdf so expand/collapse can re-rasterize crisply instead
+// of upscaling the existing canvases.
+async function renderPdfPages(pdf, box, gen) {
+  box.innerHTML = '';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const targetW = (box.clientWidth || 600) - 28;  // minus #viewer-content padding
   const pages = Math.min(pdf.numPages, PDF_MAX_PAGES);
   for (let n = 1; n <= pages; n++) {
     const page = await pdf.getPage(n);
-    if (gen !== _viewerGen) { pdf.destroy(); return; }
+    if (gen !== _viewerGen || _pdfDoc !== pdf) return;  // superseded
     const scale = Math.max(0.2, targetW / page.getViewport({ scale: 1 }).width);
     const vp = page.getViewport({ scale: scale * dpr });
     const canvas = document.createElement('canvas');
@@ -1576,6 +1573,42 @@ async function renderPdf(entry, box, gen) {
   }
 }
 
+// Render a PDF blob via the self-hosted PDF.js. Works in every browser (incl.
+// WebKit/iOS, which can't frame a blob PDF) and keeps the doc in the pane.
+async function renderPdf(entry, box, gen) {
+  if (!window.pdfjsLib) throw new Error('PDF viewer failed to load');
+  if (!_pdfWorkerSet) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js?v=121';
+    _pdfWorkerSet = true;
+  }
+  const data = await entry.blob.arrayBuffer();
+  if (gen !== _viewerGen) return;
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  if (gen !== _viewerGen) { pdf.destroy(); return; }
+  _pdfDoc = pdf;
+  await renderPdfPages(pdf, box, gen);
+}
+
+function updateExpandIcon(expanded) {
+  const b = $('viewer-expand');
+  if (!b) return;
+  b.innerHTML = svgIcon(expanded ? 'minimize' : 'maximize', 'nav-ico');
+  b.title = expanded ? 'Exit full window' : 'Expand to full window';
+}
+
+// Toggle the preview pane between the side column and a full-window overlay.
+// The ✕ still returns to Colloqui; this just changes how much room the file gets.
+function toggleViewerExpand() {
+  const expanded = $('preview-pane').classList.toggle('expanded');
+  updateExpandIcon(expanded);
+  // Re-rasterize the PDF at the new width so it stays sharp, not upscaled. Wait
+  // a frame so the width change lands before we measure the box.
+  if (_pdfDoc) {
+    const box = $('viewer-content');
+    requestAnimationFrame(() => renderPdfPages(_pdfDoc, box, _viewerGen).catch(() => {}));
+  }
+}
+
 async function openViewer(file) {
   const kind = previewKind(file.content_type);
   if (!kind) return downloadFile(file);
@@ -1584,9 +1617,11 @@ async function openViewer(file) {
   $('viewer-download').onclick = () => downloadFile(file);
   const box = $('viewer-content');
   box.innerHTML = '';
+  if (_pdfDoc) { _pdfDoc.destroy(); _pdfDoc = null; }
   const gen = ++_viewerGen;
   closeThread();
   $('preview-pane').classList.remove('hidden');
+  updateExpandIcon($('preview-pane').classList.contains('expanded'));
   try {
     const entry = await loadAuthedFile(file.id);
     if (gen !== _viewerGen) return;
@@ -4132,8 +4167,14 @@ $('when-min').onchange = submitCustomWhen;
 $('when-cancel').onclick = () => closeWhen(null);
 $('when').onclick = e => { if (e.target === $('when')) closeWhen(null); };
 $('viewer-close').onclick = () => { closePreview(); maybeReopenInfoPane(); };
+$('viewer-expand').onclick = toggleViewerExpand;
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closePreview();
+  if (e.key !== 'Escape') return;
+  const pane = $('preview-pane');
+  if (pane.classList.contains('hidden')) return;
+  // Escape backs out one level: full window -> side pane -> closed.
+  if (pane.classList.contains('expanded')) toggleViewerExpand();
+  else { closePreview(); maybeReopenInfoPane(); }
 });
 // Tap-opened emoji strips close when tapping anywhere else.
 document.addEventListener('click', () => {
@@ -4256,6 +4297,8 @@ const ICON_PATHS = {
   trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
   reply: '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
   chevron: '<polyline points="9 18 15 12 9 6"/>',
+  maximize: '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
+  minimize: '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>',
 };
 function svgIcon(name, cls) {
   return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ''}</svg>`;
