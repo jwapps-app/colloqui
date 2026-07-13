@@ -393,10 +393,12 @@ main header .topic { flex: 1; font-weight: 400; font-size: 13px; color: var(--mu
   display: flex; flex-direction: column;
 }
 #viewer-content img { max-width: 100%; border-radius: 8px; margin: 0 auto; }
-#viewer-content iframe {
-  flex: 1; width: 100%; min-height: 0;
-  border: none; border-radius: 8px; background: #fff;
+/* PDF pages, rasterized by PDF.js — stack them full-width with a little gap. */
+#viewer-content .pdf-page {
+  width: 100%; height: auto; display: block; margin: 0 auto 10px;
+  border-radius: 4px; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .25);
 }
+#viewer-content .pdf-note { text-align: center; margin-top: 6px; }
 #viewer-content video { max-width: 100%; border-radius: 8px; }
 #viewer-content audio { width: 100%; margin-top: 24px; }
 #viewer-content pre {

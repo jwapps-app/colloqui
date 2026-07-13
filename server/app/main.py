@@ -96,6 +96,9 @@ CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; "
     "img-src 'self' data: blob:; media-src 'self' blob:; "
     "frame-src blob:; object-src 'none'; "
+    # PDF.js runs its parser in a same-origin web worker (blob: covers the
+    # fallback path where it wraps the worker in a blob URL).
+    "worker-src 'self' blob:; "
     f"connect-src 'self' {_ws_origin}; frame-ancestors 'none'; base-uri 'none'; "
     "form-action 'self'"
 )

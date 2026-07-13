@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '120';
+const APP_VERSION = '121';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -1535,35 +1535,61 @@ async function loadInfoPane() {
   }
 }
 
-const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
-  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// Bumped on every openViewer call; an in-flight PDF render bails if a newer
+// file was opened meanwhile (rendering is async and page-by-page).
+let _viewerGen = 0;
+let _pdfWorkerSet = false;
+const PDF_MAX_PAGES = 50;
+
+// Render a PDF blob to stacked <canvas> pages via the self-hosted PDF.js. This
+// works in every browser (incl. WebKit/iOS, which can't frame a blob PDF) and
+// keeps the document inside the preview pane.
+async function renderPdf(entry, box, gen) {
+  if (!window.pdfjsLib) throw new Error('PDF viewer failed to load');
+  if (!_pdfWorkerSet) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js?v=121';
+    _pdfWorkerSet = true;
+  }
+  const data = await entry.blob.arrayBuffer();
+  if (gen !== _viewerGen) return;
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  if (gen !== _viewerGen) { pdf.destroy(); return; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const targetW = (box.clientWidth || 600) - 28;  // minus #viewer-content padding
+  const pages = Math.min(pdf.numPages, PDF_MAX_PAGES);
+  for (let n = 1; n <= pages; n++) {
+    const page = await pdf.getPage(n);
+    if (gen !== _viewerGen) { pdf.destroy(); return; }
+    const scale = Math.max(0.2, targetW / page.getViewport({ scale: 1 }).width);
+    const vp = page.getViewport({ scale: scale * dpr });
+    const canvas = document.createElement('canvas');
+    canvas.className = 'pdf-page';
+    canvas.width = vp.width; canvas.height = vp.height;
+    box.appendChild(canvas);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+  }
+  if (pdf.numPages > pages) {
+    const note = document.createElement('p');
+    note.className = 'muted pdf-note';
+    note.textContent = `Showing the first ${pages} of ${pdf.numPages} pages — use Download for the whole file.`;
+    box.appendChild(note);
+  }
+}
 
 async function openViewer(file) {
   const kind = previewKind(file.content_type);
   if (!kind) return downloadFile(file);
   closeInfoPane();
-  if (kind === 'pdf' && IS_IOS) {
-    // iOS WebKit can't render PDFs in embedded frames — hand the blob to
-    // the system viewer in a new tab instead. The window must be opened
-    // synchronously (before any await) or Safari blocks it as a popup.
-    const w = window.open('', '_blank');
-    try {
-      const entry = await loadAuthedFile(file.id);
-      if (w) { w.location = entry.url; return; }
-    } catch {
-      if (w) w.close();
-    }
-    return downloadFile(file);
-  }
   $('viewer-title').textContent = file.filename;
   $('viewer-download').onclick = () => downloadFile(file);
   const box = $('viewer-content');
   box.innerHTML = '';
-  closeInfoPane();
+  const gen = ++_viewerGen;
   closeThread();
   $('preview-pane').classList.remove('hidden');
   try {
     const entry = await loadAuthedFile(file.id);
+    if (gen !== _viewerGen) return;
     if (kind === 'text') {
       if (entry.blob.size > 1024 * 1024) throw new Error('Too large to preview — use Download');
       const pre = document.createElement('pre');
@@ -1571,10 +1597,13 @@ async function openViewer(file) {
       box.appendChild(pre);
       return;
     }
+    if (kind === 'pdf') {
+      await renderPdf(entry, box, gen);
+      return;
+    }
     const el = kind === 'image' ? document.createElement('img')
       : kind === 'video' ? document.createElement('video')
-      : kind === 'audio' ? document.createElement('audio')
-      : document.createElement('iframe');
+      : document.createElement('audio');
     if (kind === 'video' || kind === 'audio') el.controls = true;
     if (kind === 'image') el.alt = file.filename;
     el.src = entry.url;
