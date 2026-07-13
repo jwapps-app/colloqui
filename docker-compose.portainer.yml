@@ -28,6 +28,13 @@ services:
       - PUSH_RELAY_URL=${PUSH_RELAY_URL:-}
       - PUSH_RELAY_API_KEY=${PUSH_RELAY_API_KEY:-}
       - APNS_TOPIC=${APNS_TOPIC:-com.jworthington.colloqui}
+    # SECURITY: publishing this port exposes the raw origin on the NAS LAN,
+    # bypassing Cloudflare (its WAF/rate-limiting) and letting a direct client
+    # spoof CF-Connecting-IP to defeat the login rate limiter. Preferred setup:
+    # connect the cloudflared container to colloqui_net (it's `attachable`) and
+    # point its ingress at http://api:8000, then DELETE this ports: block so the
+    # origin is reachable only through the tunnel. Keep it only if cloudflared
+    # can't share this network.
     ports:
       - "${API_PORT:-3300}:8000"
     volumes:
@@ -84,10 +91,14 @@ services:
 
 # An explicit user-defined bridge network — this is what gives the containers
 # DNS so `api` can reach `db` by name. (Synology's legacy default bridge does
-# not, which is why a network must be declared.)
+# not, which is why a network must be declared.) `attachable` lets the separate
+# cloudflared container join it (`docker network connect colloqui_net
+# cloudflared`) so the tunnel can reach the api as http://api:8000 without a
+# published host port — see the security note on the api service's ports.
 networks:
   colloqui_net:
     driver: bridge
+    attachable: true
     ipam:
       config:
         - subnet: 10.213.0.0/24

@@ -76,3 +76,7 @@ services:
 networks:
   colloqui_net:
     name: colloqui_net
+    # attachable so a separate cloudflared container can join and reach the api
+    # as http://api:8000, letting you drop the api's published host port (which
+    # otherwise exposes the origin on the LAN, bypassing Cloudflare).
+    attachable: true
