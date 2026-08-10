@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '122';
+const APP_VERSION = '123';
 async function checkForUpdate() {
   try {
     const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
@@ -72,6 +72,17 @@ function keepMessagesPinned() {
   if (!app || !app.classList.contains('chat-open')) return;  // no channel open
   const box = document.getElementById('messages');
   if (box && stickBottom) box.scrollTop = box.scrollHeight;
+}
+// Scroll the message list to the newest message. Runs now and again over the
+// next couple of frames: WebKit (Safari, incl. the Mac PWA) often hasn't
+// finished laying out freshly-inserted messages when we first read
+// scrollHeight, which strands the view above the true bottom.
+function scrollMessagesToBottom() {
+  const box = document.getElementById('messages');
+  if (!box) return;
+  const jump = () => { box.scrollTop = box.scrollHeight; };
+  jump();
+  requestAnimationFrame(() => { jump(); requestAnimationFrame(jump); });
 }
 // On every viewport change: re-measure, then undo iOS's scroll-into-view. When
 // an input is focused, iOS scrolls the layout viewport to reveal it — but the
@@ -919,8 +930,8 @@ async function selectChannel(ch) {
   const box = $('messages');
   box.innerHTML = '';
   messages.forEach(renderMessage);
-  box.scrollTop = box.scrollHeight;
   stickBottom = true;
+  scrollMessagesToBottom();
   _lastVH = parseInt(document.documentElement.style.getPropertyValue('--vh'), 10) || 0;
   oldestMessageId = messages.length ? messages[0].id : null;
   allHistoryLoaded = messages.length < 100;
@@ -2031,6 +2042,9 @@ function buildMessageNode(m, opts) {
       img.alt = m.file.filename;
       img.title = 'Click to view full size';
       img.onclick = () => openViewer(m.file);
+      // An image loads with zero height, then grows — re-pin to the bottom as it
+      // lands so a channel that ends in an image still opens fully scrolled down.
+      img.addEventListener('load', keepMessagesPinned);
       loadAuthedBlob(m.file.id).then(url => { img.src = url; }).catch(() => img.remove());
       main.appendChild(img);
     } else {
