@@ -399,7 +399,10 @@ class Message(Base):
     channel_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("channels.id", ondelete="CASCADE"), index=True
     )
-    sender_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    # Indexed: the threads inbox filters on sender_id (see migration 0022).
+    sender_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
@@ -458,7 +461,9 @@ class EventSubscription(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     url: Mapped[str] = mapped_column(String(500))
     secret: Mapped[str] = mapped_column(String(64))  # HMAC key for signatures
-    events: Mapped[str | None] = mapped_column(String(300))
+    # Text, not String(300): the schema admits 20 event names, which can exceed
+    # 300 chars joined and used to fail with a 500 at flush (migration 0022).
+    events: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

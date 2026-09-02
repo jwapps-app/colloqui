@@ -175,6 +175,9 @@ async def _deliver(
                 # Fresh dict per call: pywebpush mutates it (adds aud/exp).
                 vapid_claims={"sub": keys["subject"]},
                 ttl=86400,
+                # pywebpush uses requests, whose default is NO timeout; a hung
+                # push service would otherwise pin a worker thread forever.
+                timeout=10,
             )
         except WebPushException as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
@@ -263,6 +266,7 @@ async def send_test(user_id: uuid.UUID) -> dict:
                     vapid_private_key=keys["vapid"],
                     vapid_claims={"sub": keys["subject"]},
                     ttl=60,
+                    timeout=10,
                 )
                 results.append(
                     {"host": host, "ok": True, "status": getattr(resp, "status_code", 0)}

@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     push_relay_api_key: str = ""   # the relay's API_KEY_COLLOQUI — secret, env only
     apns_topic: str = "com.jworthington.colloqui"  # bundle id the relay routes on
 
+    # Outgoing webhooks (admin-configured) are refused for loopback, link-local
+    # (incl. cloud metadata), reserved and multicast destinations. RFC1918 LAN
+    # addresses are ALLOWED by default so a self-hosted CRM on the home network
+    # keeps working; set true to refuse those too.
+    webhook_block_private: bool = False
+
     # Web Push (PWA notifications) via VAPID. All optional — web push is a silent
     # no-op until these are set. Keys are base64url (generate them with the
     # snippet in the README). We sign with our own keys and POST straight to the

@@ -10,10 +10,13 @@ import hmac
 import json
 import logging
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import select
 
+from . import links
+from .config import settings
 from .db import SessionLocal
 from .models import EventSubscription, utcnow
 
@@ -36,6 +39,16 @@ def _http_client() -> httpx.AsyncClient:
 
 
 async def _deliver(url: str, secret: str, body: bytes, event_type: str) -> None:
+    # Refuse unsafe destinations at delivery time too (not just registration,
+    # since DNS can change): http(s) only, and every resolved address must pass
+    # the outbound guard. Loopback, link-local/metadata, reserved and multicast
+    # are always refused; LAN hosts are allowed unless WEBHOOK_BLOCK_PRIVATE.
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not await links.host_allowed(
+        parsed.hostname or "", allow_private=not settings.webhook_block_private
+    ):
+        log.warning("outgoing webhook %s -> %s refused: unsafe destination", event_type, url)
+        return
     delivery_id = str(uuid.uuid4())
     sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     headers = {

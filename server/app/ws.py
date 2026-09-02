@@ -14,6 +14,28 @@ from .security import RateLimiter
 
 router = APIRouter()
 
+# A real person has a handful of devices (phone, iPad, Mac, PWA); cap resident
+# sockets per user so a leaky or stuck client can't grow the connection map
+# (and the cost of every broadcast) without bound.
+MAX_SOCKETS_PER_USER = 10
+# Bound each WebSocket send. Fan-out is awaited inline on the message-send
+# request path, so one backpressured client must not stall the sender.
+SEND_TIMEOUT = 5.0
+
+_bg: set[asyncio.Task] = set()
+
+
+def _fire(coro) -> None:
+    """Fire-and-forget with a strong ref (the loop holds tasks only weakly)."""
+    async def _safe():
+        try:
+            await coro
+        except Exception:
+            pass
+    task = asyncio.create_task(_safe())
+    _bg.add(task)
+    task.add_done_callback(_bg.discard)
+
 
 class ConnectionManager:
     """Tracks live sockets per user with an active/away state; events fan out to
@@ -25,7 +47,14 @@ class ConnectionManager:
         self._conns: dict[uuid.UUID, dict[WebSocket, str]] = {}
 
     def add(self, user_id: uuid.UUID, ws: WebSocket) -> None:
-        self._conns.setdefault(user_id, {})[ws] = "active"
+        conns = self._conns.setdefault(user_id, {})
+        # Over the per-user cap, evict the OLDEST socket (dict order = insertion
+        # order) and close it; its own disconnect handler then no-ops on remove.
+        while len(conns) >= MAX_SOCKETS_PER_USER:
+            oldest = next(iter(conns))
+            conns.pop(oldest, None)
+            _fire(oldest.close(code=4409))
+        conns[ws] = "active"
 
     def remove(self, user_id: uuid.UUID, ws: WebSocket) -> None:
         conns = self._conns.get(user_id)
@@ -54,7 +83,12 @@ class ConnectionManager:
         for user_id in set(user_ids):
             for ws in list(self._conns.get(user_id, {})):
                 try:
-                    await ws.send_json(payload)
+                    await asyncio.wait_for(ws.send_json(payload), timeout=SEND_TIMEOUT)
+                except asyncio.TimeoutError:
+                    # A stalled/backpressured socket: drop it so it can't hold up
+                    # this fan-out again. The client reconnects on its own.
+                    self.remove(user_id, ws)
+                    _fire(ws.close(code=4408))
                 except Exception:
                     pass  # dead socket; the disconnect handler cleans it up
 

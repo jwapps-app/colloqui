@@ -946,7 +946,9 @@ async def test_web_push_send(monkeypatch, make_user):
     class Resp:
         def __init__(self, status): self.status_code = status
 
-    def fake_webpush(subscription_info, data, vapid_private_key, vapid_claims, ttl=None):
+    # Mirrors pywebpush.webpush's signature, incl. the timeout the app now passes.
+    def fake_webpush(subscription_info, data, vapid_private_key, vapid_claims,
+                     ttl=None, timeout=None):
         ep = subscription_info["endpoint"]
         sent.append(ep)
         payloads.append(data)
@@ -1046,7 +1048,9 @@ async def test_event_subscription_crud(client, make_user):
     r = await client.post(
         "/api/v1/admin/event-subscriptions",
         headers=auth(admin_tok),
-        json={"url": "https://example.test/hook", "events": ["message.created"]},
+        # An IP literal: the guard resolves the host and refuses unroutable or
+        # unresolvable targets (.test never resolves), so use a real public IP.
+        json={"url": "https://8.8.8.8/hook", "events": ["message.created"]},
     )
     assert r.status_code == 201
     body = r.json()

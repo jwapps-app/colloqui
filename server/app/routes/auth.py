@@ -58,6 +58,7 @@ from ..schemas import (
 )
 from ..security import (
     ExpiringStore,
+    RateLimiter,
     b64url_decode,
     b64url_encode,
     hash_password,
@@ -74,6 +75,33 @@ router = APIRouter(
 # real Argon2 hash (this one when the username/credential doesn't exist) so the
 # response time can't reveal whether a username exists (enumeration via timing).
 _DUMMY_PASSWORD_HASH = hash_password("colloqui-login-timing-equalizer")
+# Looked up when the username doesn't exist so the credential query still runs;
+# one query vs two would otherwise leak username existence via response latency.
+_DUMMY_UUID = uuid.UUID(int=0)
+
+# Per-ACCOUNT brake on password/TOTP guessing, independent of the per-IP limiter
+# (a rotating source or shared NAT defeats IP-keyed throttling). Ten failures in
+# 15 minutes locks the account until the window slides; success clears it.
+_acct_fail_limiter = RateLimiter(limit=10, window_seconds=900)
+_LOCKED_MSG = "Too many failed sign-in attempts. Try again in a few minutes."
+
+
+def _acct_key(user_id: uuid.UUID) -> str:
+    return f"acct:{user_id}"
+
+
+async def _consume_invite(db: AsyncSession, invite: Invite, user_id: uuid.UUID) -> None:
+    """Mark an invite used ATOMICALLY. Two concurrent registrations on the same
+    code would otherwise both pass the used_by-is-None check and both succeed;
+    here the loser updates 0 rows and is rejected, so one invite yields exactly
+    one account (and a recovery invite exactly one credential reset)."""
+    res = await db.execute(
+        update(Invite)
+        .where(Invite.id == invite.id, Invite.used_by.is_(None))
+        .values(used_by=user_id, used_at=utcnow())
+    )
+    if res.rowcount != 1:
+        raise HTTPException(403, "Invite is no longer valid")
 
 # Short-lived WebAuthn challenges, keyed by an opaque token returned to the
 # client between the options and verify steps. Single-process only.
@@ -238,8 +266,7 @@ async def register_verify(
         )
     )
     if invite:
-        invite.used_by = user.id
-        invite.used_at = utcnow()
+        await _consume_invite(db, invite, user.id)
 
     if not pending["recover"]:
         # Every new user joins the default space (and its public channels).
@@ -329,6 +356,11 @@ async def register_password(
     is_first_user, invite, recover_user = await _resolve_registration(
         db, username, body.invite_code
     )
+    # Re-check right before creating the account (mirrors register/verify): two
+    # requests racing an empty server could both read count==0 and both mint an
+    # admin.
+    if is_first_user and await db.scalar(select(func.count()).select_from(User)):
+        raise HTTPException(403, "Server is already initialized")
     if recover_user is not None:
         user = recover_user
         # Claiming a pre-created/recovery account: invalidate any old sessions.
@@ -354,8 +386,7 @@ async def register_password(
     else:
         existing.password_hash = hash_password(body.password)
     if invite:
-        invite.used_by = user.id
-        invite.used_at = utcnow()
+        await _consume_invite(db, invite, user.id)
     await db.flush()
     token = await _issue_session(db, user, request)
     await db.commit()
@@ -367,21 +398,33 @@ async def login_password(
     body: LoginPasswordIn, request: Request, db: AsyncSession = Depends(get_db)
 ) -> TokenOut:
     user = await db.scalar(select(User).where(User.username == body.username.lower()))
-    cred = await db.get(PasswordCredential, user.id) if (user and not user.disabled) else None
-    # Always run exactly one verification (dummy hash when there's no credential)
-    # so timing doesn't leak whether the username exists.
+    # Per-account lockout: refuse before doing any work once the account has
+    # accumulated too many recent failures (password or TOTP), independent of IP.
+    if user is not None and _acct_fail_limiter.is_limited(_acct_key(user.id)):
+        raise HTTPException(429, _LOCKED_MSG)
+    # Always run the credential lookup AND exactly one Argon2 verification (a
+    # dummy id / dummy hash when the user or credential doesn't exist), so
+    # neither the query count nor the hashing time reveals whether a username
+    # exists.
+    cred = await db.get(
+        PasswordCredential, user.id if (user and not user.disabled) else _DUMMY_UUID
+    )
     ok = verify_password(cred.password_hash if cred else _DUMMY_PASSWORD_HASH, body.password)
     if not (cred and ok):
+        if user is not None:
+            _acct_fail_limiter.allow(_acct_key(user.id))  # record the strike
         raise HTTPException(401, "Incorrect username or password")
     # Second factor, if the account has confirmed TOTP. Passkey login skips this
     # (a passkey is already a strong second factor on its own).
     totp = await db.get(TotpCredential, user.id)
     if totp is not None and totp.confirmed_at is not None:
         if not body.code:
-            # Signal the client to prompt for a code, then resubmit.
+            # Signal the client to prompt for a code, then resubmit. Not a strike.
             raise HTTPException(401, "mfa_required")
         if not verify_second_factor(totp, body.code):
+            _acct_fail_limiter.allow(_acct_key(user.id))  # record the strike
             raise HTTPException(401, "Incorrect authentication code")
+    _acct_fail_limiter.reset(_acct_key(user.id))  # a clean sign-in clears strikes
     token = await _issue_session(db, user, request)
     await db.commit()
     return TokenOut(token=token, user=MeOut.model_validate(user))

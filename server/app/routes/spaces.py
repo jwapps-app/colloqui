@@ -2,7 +2,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -140,8 +140,14 @@ async def reorder_spaces(
 ) -> None:
     """Set the global top-to-bottom order of spaces (admin only). `order` is the
     space ids in the desired order; each gets position = its index."""
-    for i, sid in enumerate(body.order):
-        await db.execute(update(Space).where(Space.id == sid).values(position=i))
+    # One statement instead of one UPDATE per space: CASE maps each id to its index.
+    positions = {sid: i for i, sid in enumerate(body.order)}
+    if positions:
+        await db.execute(
+            update(Space)
+            .where(Space.id.in_(list(positions)))
+            .values(position=case(positions, value=Space.id))
+        )
 
 
 @router.post("", response_model=SpaceOut, status_code=201)

@@ -36,7 +36,11 @@ def extract_urls(text: str, limit: int = 3) -> list[str]:
     return seen
 
 
-def _ip_is_public(ip_str: str) -> bool:
+def ip_allowed(ip_str: str, allow_private: bool = False) -> bool:
+    """Is this a safe outbound destination? Loopback, link-local (incl. cloud
+    metadata at 169.254.x), reserved, multicast and unspecified are ALWAYS
+    refused. RFC1918 private ranges are refused unless allow_private (used for
+    admin-configured webhooks that legitimately target a LAN host)."""
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -45,27 +49,37 @@ def _ip_is_public(ip_str: str) -> bool:
     # address is still caught (is_private doesn't unwrap on all versions).
     if getattr(ip, "ipv4_mapped", None) is not None:
         ip = ip.ipv4_mapped
-    return not (
-        ip.is_private
-        or ip.is_loopback
+    if (
+        ip.is_loopback
         or ip.is_link_local
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
-    )
+    ):
+        return False
+    return allow_private or not ip.is_private
 
 
-async def _host_is_public(host: str) -> bool:
+def _ip_is_public(ip_str: str) -> bool:
+    return ip_allowed(ip_str, allow_private=False)
+
+
+async def host_allowed(host: str, allow_private: bool = False) -> bool:
+    """Resolve `host` and require EVERY address to pass ip_allowed."""
     if not host:
         return False
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)
     except (socket.gaierror, UnicodeError, OSError):
         return False
-    # Every resolved address must be public. This is a fast pre-connect reject;
-    # the authoritative check is on the actual peer IP after connecting (below),
-    # which is what closes the DNS-rebinding TOCTOU.
-    return bool(infos) and all(_ip_is_public(info[4][0]) for info in infos)
+    return bool(infos) and all(ip_allowed(info[4][0], allow_private) for info in infos)
+
+
+async def _host_is_public(host: str) -> bool:
+    # Fast pre-connect reject for link previews; the authoritative check is on
+    # the actual peer IP after connecting (below), which closes the
+    # DNS-rebinding TOCTOU.
+    return await host_allowed(host, allow_private=False)
 
 
 def _meta_map(head: str) -> dict[str, str]:

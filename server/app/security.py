@@ -91,3 +91,12 @@ class RateLimiter:
             hits.append(now)
         self._hits[key] = hits
         return allowed
+
+    def is_limited(self, key: str) -> bool:
+        """Read-only: is this key at/over its limit right now? (Does not record.)"""
+        now = time.monotonic()
+        return sum(1 for t in self._hits.get(key, []) if now - t < self.window) >= self.limit
+
+    def reset(self, key: str) -> None:
+        """Forget a key's hits (e.g. clear failed-login strikes on success)."""
+        self._hits.pop(key, None)

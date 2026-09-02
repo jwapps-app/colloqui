@@ -1,11 +1,13 @@
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import links
 from ..config import settings
 from ..db import get_db
 from ..deps import get_admin_user
@@ -328,9 +330,23 @@ async def create_event_subscription(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_admin_user),
 ) -> EventSubCreatedOut:
+    url = body.url.strip()
+    # Refuse unsafe destinations up front (also re-checked at delivery, since
+    # DNS can change): http(s) only, and the host must not resolve to loopback,
+    # link-local/metadata, reserved or multicast addresses. LAN hosts are
+    # allowed unless WEBHOOK_BLOCK_PRIVATE is set.
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not await links.host_allowed(
+        parsed.hostname or "", allow_private=not settings.webhook_block_private
+    ):
+        raise HTTPException(
+            400,
+            "Webhook URL must be an http(s) address that isn't loopback, "
+            "link-local or otherwise unroutable",
+        )
     secret = "whsec_" + new_token()
     sub = EventSubscription(
-        url=body.url.strip(),
+        url=url,
         secret=secret,
         events=",".join(body.events) if body.events else None,
     )

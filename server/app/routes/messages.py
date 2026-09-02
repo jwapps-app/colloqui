@@ -318,6 +318,10 @@ async def _fetch_and_broadcast_previews(
         log.exception("link preview fetch failed for message %s", message_id)
 
 
+# Strong refs to in-flight preview fetches (see schedule_previews).
+_preview_tasks: set[asyncio.Task] = set()
+
+
 def schedule_previews(
     message_id: uuid.UUID, channel_id: uuid.UUID, content: str
 ) -> None:
@@ -325,9 +329,14 @@ def schedule_previews(
     them to clients over the WebSocket when ready."""
     urls = links.extract_urls(content)
     if urls:
-        asyncio.create_task(
+        # Keep a strong ref: the loop holds tasks only weakly, so an unreferenced
+        # create_task() can be GC'd mid-flight and the preview silently never
+        # renders (same guard push/webpush/webhooks_out already carry).
+        task = asyncio.create_task(
             _fetch_and_broadcast_previews(message_id, channel_id, urls)
         )
+        _preview_tasks.add(task)
+        task.add_done_callback(_preview_tasks.discard)
 
 
 async def completions_for(
@@ -470,6 +479,7 @@ async def all_pins(
                 Message.pinned_at.is_not(None),
             )
             .order_by(Message.pinned_at.desc())
+            .limit(500)  # bound the response like the other cross-channel feeds
         )
     ).all()
     return [
@@ -741,15 +751,6 @@ async def _broadcast_thread_meta(
     )
 
 
-async def _notify_level(
-    db: AsyncSession, channel: Channel, user_id: uuid.UUID
-) -> str:
-    pref = await db.get(ChannelNotifyPref, (channel.id, user_id))
-    if pref:
-        return pref.level
-    return "all"
-
-
 async def _notify_for_message(
     db: AsyncSession, channel: Channel, sender: User, content: str
 ) -> None:
@@ -757,20 +758,27 @@ async def _notify_for_message(
     if channel.is_dm:
         # ALL other members — group DMs (3+) exist, and `scalar` here notified
         # exactly one arbitrary participant while the rest heard nothing.
-        other_ids = (
-            await db.scalars(
-                select(ChannelMember.user_id).where(
+        # One query for the members AND their per-channel level (mirrors the
+        # non-DM branch below; this used to do a separate get per member).
+        rows = (
+            await db.execute(
+                select(ChannelMember.user_id, ChannelNotifyPref.level)
+                .outerjoin(
+                    ChannelNotifyPref,
+                    and_(
+                        ChannelNotifyPref.channel_id == channel.id,
+                        ChannelNotifyPref.user_id == ChannelMember.user_id,
+                    ),
+                )
+                .where(
                     ChannelMember.channel_id == channel.id,
                     ChannelMember.user_id != sender.id,
                 )
             )
         ).all()
-        for other_id in other_ids:
+        for other_id, level in rows:
             # Online users see the message arrive live; notify only the absent.
-            if (
-                not manager.is_online(other_id)
-                and await _notify_level(db, channel, other_id) != "muted"
-            ):
+            if not manager.is_online(other_id) and (level or "all") != "muted":
                 await notify_user(
                     db,
                     other_id,

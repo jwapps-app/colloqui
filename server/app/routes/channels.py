@@ -1,10 +1,9 @@
-import re
 import uuid
 from datetime import timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -41,6 +40,11 @@ from ..ws import manager
 
 # What members hear before they pick a per-channel preference.
 DEFAULT_NOTIFY_LEVEL = "all"
+
+# Unchecked task lines in a message body, counted in SQL. The "n" flag makes ^
+# anchor at each line start and keeps . from crossing a newline, matching the
+# per-line `^\[ \] .` the client renders as a checkbox. Requires Postgres 15+.
+OPEN_TASK_COUNT = func.regexp_count(Message.content, r"^\[ \] .", 1, "n")
 
 router = APIRouter(prefix="/api/v1", tags=["channels"])
 
@@ -143,17 +147,18 @@ async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOu
     )
     open_tasks = 0
     if not channel.is_dm:
-        task_msgs = await db.scalars(
-            select(Message.content).where(
-                Message.channel_id == channel.id,
-                Message.deleted_at.is_(None),
-                Message.content.ilike("%[ ] %"),
+        # Count unchecked task lines in SQL (regexp_count with the newline-
+        # sensitive flag so ^ anchors each line) instead of shipping every
+        # task-bearing message body to Python and re-parsing it per request.
+        open_tasks = (
+            await db.scalar(
+                select(func.coalesce(func.sum(OPEN_TASK_COUNT), 0)).where(
+                    Message.channel_id == channel.id,
+                    Message.deleted_at.is_(None),
+                    Message.content.ilike("%[ ] %"),
+                )
             )
-        )
-        for content in task_msgs:
-            open_tasks += sum(
-                1 for line in content.split("\n") if re.match(r"^\[ \] .", line)
-            )
+        ) or 0
     reminders = await db.scalar(
         select(func.count())
         .select_from(Reminder)
@@ -348,18 +353,21 @@ async def channels_out_bulk(
     # channel (checkbox lines that are still unchecked).
     task_by: dict = {}
     if non_dm_ids:
-        for cid, content in (
+        # Sum unchecked task lines per channel in SQL. This backs every sidebar
+        # refresh; it used to ship the full body of every task-bearing message
+        # across all the user's channels and re-parse them in Python each time.
+        for cid, n in (
             await db.execute(
-                select(Message.channel_id, Message.content).where(
+                select(Message.channel_id, func.sum(OPEN_TASK_COUNT))
+                .where(
                     Message.channel_id.in_(non_dm_ids),
                     Message.deleted_at.is_(None),
                     Message.content.ilike("%[ ] %"),
                 )
+                .group_by(Message.channel_id)
             )
         ).all():
-            task_by[cid] = task_by.get(cid, 0) + sum(
-                1 for line in content.split("\n") if re.match(r"^\[ \] .", line)
-            )
+            task_by[cid] = int(n or 0)
 
     # DM participants, bulk-fetched.
     dm_members_by: dict = {}
@@ -473,11 +481,14 @@ async def reorder_channels(
         member = await db.get(SpaceMember, (space.id, user.id))
         if member is None or member.role != "manager":
             raise HTTPException(403, "Only a space manager can reorder its channels")
-    for i, cid in enumerate(body.order):
+    # One statement instead of one UPDATE per channel: CASE maps each id to its
+    # index. Scoped to this space so foreign ids in `order` are inert.
+    positions = {cid: i for i, cid in enumerate(body.order)}
+    if positions:
         await db.execute(
             update(Channel)
-            .where(Channel.id == cid, Channel.space_id == space.id)
-            .values(position=i)
+            .where(Channel.id.in_(list(positions)), Channel.space_id == space.id)
+            .values(position=case(positions, value=Channel.id))
         )
     await db.flush()
     # The order is global, so nudge everyone in the space to re-sort their sidebar.
@@ -716,6 +727,15 @@ async def add_member(
         raise HTTPException(403, "Only the channel owner can add members")
     target = await db.get(User, body.user_id)
     if target is None or target.disabled:
+        raise HTTPException(404, "User not found")
+    # Keep the space boundary intact: a channel's members must belong to its
+    # space (join_channel already enforces this; add_member didn't). Admins are
+    # exempt, as elsewhere. Same 404 as join, so the check leaks nothing.
+    if (
+        channel.space_id is not None
+        and not target.is_admin
+        and await db.get(SpaceMember, (channel.space_id, target.id)) is None
+    ):
         raise HTTPException(404, "User not found")
     if await db.get(ChannelMember, (channel_id, target.id)) is None:
         db.add(ChannelMember(channel_id=channel_id, user_id=target.id))
