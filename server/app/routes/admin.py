@@ -20,6 +20,7 @@ from ..models import (
     File,
     Invite,
     PasswordCredential,
+    Space,
     User,
     WebAuthnCredential,
     utcnow,
@@ -66,6 +67,11 @@ async def delete_user(
     # the whole channel + everyone's messages) by reassigning ownership.
     await db.execute(
         update(Channel).where(Channel.created_by == user_id).values(created_by=admin.id)
+    )
+    # Spaces too: created_by is NOT NULL but ON DELETE SET NULL, so deleting a
+    # space's creator failed the whole request with a constraint error.
+    await db.execute(
+        update(Space).where(Space.created_by == user_id).values(created_by=admin.id)
     )
     # Collect their uploaded file blobs to unlink after the row cascade.
     file_ids = (
@@ -309,6 +315,8 @@ async def revoke_api_key(
     if key is None or key.revoked_at is not None:
         raise HTTPException(404, "API key not found")
     key.revoked_at = utcnow()
+    # A revoked key's open WebSocket would otherwise keep streaming.
+    await manager.disconnect_token(key.token_hash)
 
 
 # ---- Integration: outgoing event subscriptions (webhooks out) ----

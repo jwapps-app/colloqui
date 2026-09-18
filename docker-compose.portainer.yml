@@ -81,10 +81,11 @@ services:
       - >
         while true; do
         STAMP=$$(date +%Y%m%d-%H%M%S);
-        PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h 10.213.0.10 -U app -d app -Fc -f /backups/db-$$STAMP.dump
-        && { [ -d /data/uploads ] && tar czf /backups/uploads-$$STAMP.tar.gz -C /data uploads || true; }
+        PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h 10.213.0.10 -U app -d app -Fc -f /backups/.db-$$STAMP.dump.tmp
+        && mv /backups/.db-$$STAMP.dump.tmp /backups/db-$$STAMP.dump
+        && { [ ! -d /data/uploads ] || { tar czf /backups/.uploads-$$STAMP.tar.gz.tmp -C /data uploads && mv /backups/.uploads-$$STAMP.tar.gz.tmp /backups/uploads-$$STAMP.tar.gz; }; }
         && ls -1t /backups/db-*.dump | tail -n +15 | xargs -r rm -f
-        && ls -1t /backups/uploads-*.tar.gz | tail -n +15 | xargs -r rm -f
+        && ls -1t /backups/uploads-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
         && echo "[backup] $$STAMP complete" || echo "[backup] FAILED";
         sleep 86400;
         done

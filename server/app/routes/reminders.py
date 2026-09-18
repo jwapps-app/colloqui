@@ -65,6 +65,7 @@ async def create_reminder(
         user_id=user.id,
         text=body.text.strip(),
         due_at=body.due_at,
+        anchor_at=body.due_at,  # recurrence counts from here (see next_occurrence)
         channel_id=channel_id,
         message_id=body.message_id,
         recurrence=body.recurrence,
@@ -93,6 +94,7 @@ async def update_reminder(
     if body.due_at is not None:
         _validate_due_at(body.due_at)
         reminder.due_at = body.due_at
+        reminder.anchor_at = body.due_at  # a new time is a new recurrence anchor
     if body.recurrence is not None:
         reminder.recurrence = body.recurrence or None  # "" clears it
     await db.flush()

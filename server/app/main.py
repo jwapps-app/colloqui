@@ -1,4 +1,7 @@
 import asyncio
+import logging
+import os
+import re
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -69,6 +72,16 @@ async def migrate_existing_to_default_space() -> None:
 async def lifespan(app: FastAPI):
     # Schema migrations have already run (Alembic, at container start).
     Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
+    # The image runs as a non-root user; a host bind mount that Docker created
+    # as root is unwritable. Say so loudly at startup instead of failing the
+    # first upload (and the VAPID key write) with an opaque 500.
+    if not os.access(settings.upload_dir, os.W_OK):
+        logging.getLogger("colloqui").error(
+            "UPLOAD_DIR %s is not writable by the service user (uid %s): uploads, "
+            "avatars and the auto-generated VAPID key will fail. Fix the host "
+            "directory's ownership/permissions to match the container user.",
+            settings.upload_dir, os.getuid(),
+        )
     # Resolve VAPID keys (env, else auto-generate + persist) so web push works
     # out of the box with zero config.
     from . import webpush as _webpush
@@ -104,23 +117,61 @@ CSP = (
 )
 
 
-# JSON bodies are tiny (a message, a login); nothing legitimate needs more than
-# this. Caps the unauthenticated attack surface (e.g. /verify) against oversized
-# or deeply-nested JSON. Multipart file uploads set their own content-type and
-# are size-limited in the upload handler, so they're exempt.
+# Request-body caps, enforced on the bytes ACTUALLY RECEIVED (not just a
+# declared Content-Length, which a chunked or mislabelled request can omit).
+# JSON-ish bodies are tiny (a message, a login) — 256KB is generous. Anything
+# else (multipart uploads) is bounded by the file limit plus form overhead, so
+# an unauthenticated caller can't stream unbounded data into the parser before
+# the upload handler's own checks run.
 _MAX_JSON_BODY = 256 * 1024
+_MAX_OTHER_BODY = (settings.max_file_size_mb + 1) * 1024 * 1024
 
 
-@app.middleware("http")
-async def limit_json_body(request: Request, call_next):
-    ctype = request.headers.get("content-type", "")
-    if ctype.startswith("application/json"):
-        clen = request.headers.get("content-length")
-        if clen is not None and clen.isdigit() and int(clen) > _MAX_JSON_BODY:
+class BodyLimitMiddleware:
+    """Pure-ASGI so it can wrap `receive` and count body bytes as they arrive."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        ctype = headers.get(b"content-type", b"").decode("latin-1").lower()
+        # Any JSON flavour (application/json, application/problem+json, …) gets
+        # the small cap; multipart/other bodies get the upload cap.
+        limit = _MAX_OTHER_BODY if ctype.startswith("multipart/") else _MAX_JSON_BODY
+        clen = headers.get(b"content-length", b"").decode("latin-1")
+        if clen.isdigit() and int(clen) > limit:
             from starlette.responses import JSONResponse
 
-            return JSONResponse({"detail": "Request body too large"}, status_code=413)
-    return await call_next(request)
+            resp = JSONResponse({"detail": "Request body too large"}, status_code=413)
+            return await resp(scope, receive, send)
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    # Raised inside the app's own body read, so FastAPI's
+                    # exception handling turns it into a clean 413.
+                    from fastapi import HTTPException
+
+                    raise HTTPException(413, "Request body too large")
+            return message
+
+        return await self.app(scope, limited_receive, send)
+
+
+app.add_middleware(BodyLimitMiddleware)
+
+
+# Only genuine static assets get the year-long immutable cache; a `?v=` on any
+# other URL (e.g. the private calendar feed) must not turn it public/immutable.
+_STATIC_ASSET = re.compile(r"\.(js|mjs|css|png|ico|svg|json|woff2?)$")
 
 
 @app.middleware("http")
@@ -141,9 +192,12 @@ async def security_headers(request: Request, call_next):
     )
     # Isolate our browsing context from any opener/popups.
     response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
-    if request.url.path.startswith("/api/"):
+    path = request.url.path
+    if path.startswith("/api/") or path.startswith("/calendar/") or path.startswith("/hooks/"):
+        # API responses and the private calendar feed must never be cached by
+        # a shared cache or survive in a browser after sign-out.
         response.headers.setdefault("Cache-Control", "no-store")
-    elif request.query_params.get("v"):
+    elif request.query_params.get("v") and _STATIC_ASSET.search(path):
         # Version-stamped assets (app.js?v=N, icons?v=N) never change under a
         # given URL, so cache them for a year and skip the revalidation round
         # trip. A new release bumps ?v=, which is a fresh URL, so updates land.

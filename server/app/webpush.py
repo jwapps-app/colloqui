@@ -132,6 +132,17 @@ def web_push_enabled() -> bool:
     return _keys is not None
 
 
+async def _endpoint_ok(endpoint: str) -> bool:
+    from urllib.parse import urlparse
+
+    from . import links
+
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    return await links.host_allowed(parsed.hostname, allow_private=False)
+
+
 def public_key() -> str:
     return _keys["public"] if _keys else ""
 
@@ -156,6 +167,11 @@ async def _deliver(
                 )
             ).all()
         ]
+    if not subs:
+        return
+    # Defence in depth for rows that predate endpoint validation at subscribe
+    # time: never POST to anything but an https public push service.
+    subs = [s for s in subs if await _endpoint_ok(s[0])]
     if not subs:
         return
     payload = json.dumps(
@@ -254,6 +270,10 @@ async def send_test(user_id: uuid.UUID) -> dict:
         ).all()
         for sub in subs:
             host = sub.endpoint.split("/")[2] if "://" in sub.endpoint else sub.endpoint[:40]
+            if not await _endpoint_ok(sub.endpoint):
+                results.append({"host": host, "ok": False, "status": None,
+                                "error": "endpoint refused: not a public https push service"})
+                continue
             info = {
                 "endpoint": sub.endpoint,
                 "keys": {"p256dh": sub.p256dh, "auth": sub.auth},

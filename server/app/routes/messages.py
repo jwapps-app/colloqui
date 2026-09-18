@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import and_, delete, func, select, tuple_
+from sqlalchemy import and_, delete, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,7 +112,15 @@ def message_out(
 async def record_change(db: AsyncSession, message: Message) -> None:
     """Stamp a message into the offline-sync change-log (upsert, one row per
     message) with a fresh monotonic seq. Call after any change to a message's
-    rendered state (create/edit/delete/checkbox/pin/reaction)."""
+    rendered state (create/edit/delete/checkbox/pin/reaction).
+
+    Sequence values are allocated in transaction order, but transactions commit
+    in any order, so a poller could advance past a not-yet-committed earlier
+    seq and never see it. The transaction-scoped advisory lock below is held
+    from allocation until this transaction commits, which serialises the
+    allocate-then-commit window: seq order IS commit order, so `seq > cursor`
+    is gap-free. Writers block here only for the brief tail of another write."""
+    await db.execute(text("SELECT pg_advisory_xact_lock(7331002)"))
     seq = await db.scalar(select(func.nextval("change_seq")))
     now = utcnow()
     stmt = (
@@ -637,7 +645,15 @@ async def sync(
     for seq, m, u, f in rows:
         cursor = seq
         if m.deleted_at is not None:
-            out.append(message_out(m, u))  # tombstone — deleted_at carries through
+            # Tombstone: ids + deleted_at only. The original text must not ride
+            # along (it's hidden from ordinary history, and a member who joined
+            # later could otherwise read it through sync).
+            out.append(
+                message_out(m, u).model_copy(
+                    update={"content": "", "file": None, "reply_to": None,
+                            "reactions": [], "task_cleared": {}, "link_previews": []}
+                )
+            )
         else:
             out.append(
                 message_out(m, u, f, aggs.get(m.id), comps.get(m.id),
@@ -759,10 +775,13 @@ async def _notify_for_message(
         # ALL other members — group DMs (3+) exist, and `scalar` here notified
         # exactly one arbitrary participant while the rest heard nothing.
         # One query for the members AND their per-channel level (mirrors the
-        # non-DM branch below; this used to do a separate get per member).
+        # non-DM branch below). Disabled accounts are skipped here too: a
+        # disabled user with a lingering push subscription must not keep
+        # receiving DM snippets.
         rows = (
             await db.execute(
                 select(ChannelMember.user_id, ChannelNotifyPref.level)
+                .join(User, User.id == ChannelMember.user_id)
                 .outerjoin(
                     ChannelNotifyPref,
                     and_(
@@ -773,6 +792,7 @@ async def _notify_for_message(
                 .where(
                     ChannelMember.channel_id == channel.id,
                     ChannelMember.user_id != sender.id,
+                    User.disabled == False,  # noqa: E712
                 )
             )
         ).all()
@@ -904,8 +924,19 @@ async def send_message(
     db.add(message)
     await db.flush()
     await record_change(db, message)
+    if thread_root_id is not None:
+        # The root's rendered state (reply count / last reply) changed too, so
+        # stamp it into the change-log or sync clients never learn about it.
+        root = await db.get(Message, thread_root_id)
+        if root is not None:
+            await record_change(db, root)
     reply = (await reply_previews_for(db, [message])).get(message.id)
     out = message_out(message, user, file, None, None, reply)
+    # COMMIT BEFORE PUBLISHING. Everything below (broadcast, webhooks, previews,
+    # notifications) describes this message to the outside world; if any later
+    # write failed and rolled the transaction back, clients would have shown a
+    # message that never existed. This also releases record_change's lock.
+    await db.commit()
     await broadcast(
         db, channel_id, {"type": "message.created", "message": jsonable_encoder(out)}
     )
@@ -913,10 +944,14 @@ async def send_message(
     schedule_previews(message.id, channel_id, content)
     if thread_root_id is not None:
         await _broadcast_thread_meta(db, channel_id, thread_root_id)
-        # Notify everyone in the thread (its author + prior repliers), except
-        # the sender and anyone @mentioned here (they get a mention instead).
-        # Participants resolve as a subquery, so this is a single round trip.
+        # Notify everyone in the thread (its author + prior repliers) who is
+        # STILL a member of the channel, except the sender and anyone
+        # @mentioned here (they get a mention instead). Someone removed from a
+        # private channel must not keep receiving its new replies.
         mentioned = set(re.findall(r"@([a-z0-9_]{3,32})", content.lower()))
+        current_members = select(ChannelMember.user_id).where(
+            ChannelMember.channel_id == channel_id
+        )
         prows = (
             await db.execute(
                 select(User.id, User.username, ChannelNotifyPref.level)
@@ -929,6 +964,7 @@ async def send_message(
                 )
                 .where(
                     User.id.in_(thread_participant_ids_q(thread_root_id)),
+                    User.id.in_(current_members),
                     User.id != user.id,
                     User.disabled == False,  # noqa: E712
                 )
@@ -952,6 +988,22 @@ async def send_message(
     return out
 
 
+async def full_message_out(
+    db: AsyncSession, message: Message, sender: User, file: File | None
+) -> MessageOut:
+    """The COMPLETE serialization of one message (reactions, task completions,
+    reply preview, thread summary, link previews). Mutation handlers must use
+    this for the object they broadcast: clients replace the whole rendered
+    message with it, so a partial one (zero reply count, no link cards) wiped
+    that metadata from the UI until reload."""
+    aggs = (await reactions_for(db, [message.id])).get(message.id)
+    comps = (await completions_for(db, [message.id])).get(message.id)
+    reply = (await reply_previews_for(db, [message])).get(message.id)
+    thread = (await thread_meta_for(db, [message.id])).get(message.id)
+    prev = (await previews_for(db, [message])).get(message.id)
+    return message_out(message, sender, file, aggs, comps, reply, thread, prev)
+
+
 @router.post("/messages/{message_id}/checkbox", response_model=MessageOut)
 async def toggle_checkbox(
     message_id: uuid.UUID,
@@ -962,7 +1014,11 @@ async def toggle_checkbox(
     """Any channel member may flip a `[ ]`/`[x]` task line — a deliberate,
     narrow exception to sender-only editing: shared task lists are the point.
     Only the checkbox state can change, never the text."""
-    message = await db.get(Message, message_id)
+    # Row lock: two people ticking different lines read-modify-write the same
+    # content string, and the second write silently reverted the first.
+    message = await db.scalar(
+        select(Message).where(Message.id == message_id).with_for_update()
+    )
     if message is None or message.deleted_at is not None:
         raise HTTPException(404, "Message not found")
     await require_member(db, message.channel_id, user)
@@ -983,9 +1039,8 @@ async def toggle_checkbox(
     await record_change(db, message)
     sender = await db.get(User, message.sender_id)
     file = await db.get(File, message.file_id) if message.file_id else None
-    aggs = (await reactions_for(db, [message.id])).get(message.id)
-    comps = (await completions_for(db, [message.id])).get(message.id)
-    out = message_out(message, sender, file, aggs, comps)
+    out = await full_message_out(db, message, sender, file)
+    await db.commit()  # publish only what is durably saved
     await broadcast(
         db,
         message.channel_id,
@@ -1012,6 +1067,7 @@ async def list_pins(
                 Message.pinned_at.is_not(None),
             )
             .order_by(Message.pinned_at.desc())
+            .limit(500)  # bounded like the cross-channel pins feed
         )
     ).all()
     msgs = [m for m, _ in rows]
@@ -1041,10 +1097,8 @@ async def _set_pin(
     await record_change(db, message)
     sender = await db.get(User, message.sender_id)
     file = await db.get(File, message.file_id) if message.file_id else None
-    aggs = (await reactions_for(db, [message.id])).get(message.id)
-    comps = (await completions_for(db, [message.id])).get(message.id)
-    reply = (await reply_previews_for(db, [message])).get(message.id)
-    out = message_out(message, sender, file, aggs, comps, reply)
+    out = await full_message_out(db, message, sender, file)
+    await db.commit()  # publish only what is durably saved
     await broadcast(
         db, message.channel_id, {"type": "message.updated", "message": jsonable_encoder(out)}
     )
@@ -1094,6 +1148,7 @@ async def toggle_reaction(
     await db.flush()
     await record_change(db, message)
     aggs = (await reactions_for(db, [message_id])).get(message_id, [])
+    await db.commit()  # publish only what is durably saved
     await broadcast(
         db,
         message.channel_id,
@@ -1131,14 +1186,16 @@ async def edit_message(
     )
     await record_change(db, message)
     file = await db.get(File, message.file_id) if message.file_id else None
-    aggs = (await reactions_for(db, [message.id])).get(message.id)
-    reply = (await reply_previews_for(db, [message])).get(message.id)
-    out = message_out(message, user, file, aggs, None, reply)
+    out = await full_message_out(db, message, user, file)
+    await db.commit()  # publish only what is durably saved
     await broadcast(
         db,
         message.channel_id,
         {"type": "message.updated", "message": jsonable_encoder(out)},
     )
+    # Integrations were told about creates and checkbox flips but not edits,
+    # despite the documented message.updated contract.
+    dispatch_event("message.updated", jsonable_encoder(out))
     schedule_previews(message.id, message.channel_id, content)
     return out
 
@@ -1171,6 +1228,7 @@ async def delete_message(
             # missing file if the commit failed.
             blob_to_unlink = Path(settings.upload_dir) / str(file.id)
     await record_change(db, message)
+    await db.commit()  # publish only what is durably saved
     await broadcast(
         db,
         message.channel_id,

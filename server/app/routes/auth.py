@@ -1,13 +1,15 @@
+import asyncio
 import io
 import json
 import secrets
+import time
 import uuid
 from datetime import timedelta
 
 import pyotp
 import segno
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from webauthn import (
     generate_authentication_options,
@@ -31,14 +33,18 @@ from ..config import settings
 from ..db import get_db
 from ..deps import get_current_user, rate_limit_auth
 from ..models import (
+    ApiKey,
+    DeviceToken,
     Invite,
     PasswordCredential,
+    PushSubscription,
     TotpCredential,
     User,
     WebAuthnCredential,
     utcnow,
 )
 from ..models import Session as AuthSession
+from ..ws import manager
 from ..schemas import (
     AddPasskeyIn,
     LoginOptionsIn,
@@ -88,6 +94,57 @@ _LOCKED_MSG = "Too many failed sign-in attempts. Try again in a few minutes."
 
 def _acct_key(user_id: uuid.UUID) -> str:
     return f"acct:{user_id}"
+
+
+# Argon2 is deliberately expensive (hundreds of ms). Run it off the event loop
+# so one login can't stall every other socket and request, but through a small
+# semaphore so a burst of logins can't flood the thread pool either.
+_hash_sem = asyncio.Semaphore(4)
+
+
+async def _hash_password_async(password: str) -> str:
+    async with _hash_sem:
+        return await asyncio.to_thread(hash_password, password)
+
+
+async def _verify_password_async(password_hash: str, password: str) -> bool:
+    async with _hash_sem:
+        return await asyncio.to_thread(verify_password, password_hash, password)
+
+
+async def _claim_first_user(db: AsyncSession) -> None:
+    """Serialise 'first user becomes admin'. Two simultaneous registrations on
+    an empty server both read count==0; a re-check alone is still a racy read.
+    The transaction-scoped advisory lock makes the second request wait for the
+    first to commit, so its re-check sees the new row and it is refused."""
+    await db.execute(text("SELECT pg_advisory_xact_lock(7331001)"))
+    if await db.scalar(select(func.count()).select_from(User)):
+        raise HTTPException(403, "Server is already initialized")
+
+
+async def _reset_for_recovery(
+    db: AsyncSession, user_id: uuid.UUID, keep_passkey: bytes | None = None
+) -> None:
+    """Compromise recovery via an admin-issued recovery invite must evict a
+    holder of ANY old credential, not just old sessions: revoke API keys, drop
+    every passkey except the one being enrolled right now, drop the TOTP
+    secret and recovery codes (the user re-enrols), and forget push targets so
+    the old device stops receiving notifications. Sessions are revoked by the
+    caller. Also closes the user's live sockets."""
+    now = utcnow()
+    await db.execute(
+        update(ApiKey)
+        .where(ApiKey.user_id == user_id, ApiKey.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    pk = delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user_id)
+    if keep_passkey is not None:
+        pk = pk.where(WebAuthnCredential.id != keep_passkey)
+    await db.execute(pk)
+    await db.execute(delete(TotpCredential).where(TotpCredential.user_id == user_id))
+    await db.execute(delete(PushSubscription).where(PushSubscription.user_id == user_id))
+    await db.execute(delete(DeviceToken).where(DeviceToken.user_id == user_id))
+    await manager.disconnect_user(user_id)
 
 
 async def _consume_invite(db: AsyncSession, invite: Invite, user_id: uuid.UUID) -> None:
@@ -227,19 +284,20 @@ async def register_verify(
         if invite is None or invite.used_by is not None or invite.expires_at < utcnow():
             raise HTTPException(403, "Invite is no longer valid")
     elif pending["is_admin"]:
-        if await db.scalar(select(func.count()).select_from(User)):
-            raise HTTPException(403, "Server is already initialized")
+        await _claim_first_user(db)
 
     if pending["recover"]:
         user = await db.get(User, pending["user_id"])
         if user is None or user.disabled:
             raise HTTPException(403, "Account unavailable")
-        # The old device may be lost or stolen — invalidate everything it held.
+        # The old device may be lost or stolen — invalidate everything it held:
+        # sessions, other passkeys, API keys, TOTP, push targets.
         await db.execute(
             update(AuthSession)
             .where(AuthSession.user_id == user.id)
             .values(revoked=True)
         )
+        await _reset_for_recovery(db, user.id, keep_passkey=verification.credential_id)
     else:
         if await db.scalar(select(User.id).where(User.username == pending["username"])):
             raise HTTPException(409, "Username is taken")
@@ -356,17 +414,16 @@ async def register_password(
     is_first_user, invite, recover_user = await _resolve_registration(
         db, username, body.invite_code
     )
-    # Re-check right before creating the account (mirrors register/verify): two
-    # requests racing an empty server could both read count==0 and both mint an
-    # admin.
-    if is_first_user and await db.scalar(select(func.count()).select_from(User)):
-        raise HTTPException(403, "Server is already initialized")
+    if is_first_user:
+        await _claim_first_user(db)  # serialised, not just re-checked
     if recover_user is not None:
         user = recover_user
-        # Claiming a pre-created/recovery account: invalidate any old sessions.
+        # Claiming a recovery account: invalidate everything the old device
+        # held (sessions, passkeys, API keys, TOTP, push targets).
         await db.execute(
             update(AuthSession).where(AuthSession.user_id == user.id).values(revoked=True)
         )
+        await _reset_for_recovery(db, user.id)
     else:
         user = User(
             username=username, display_name=body.display_name, is_admin=is_first_user
@@ -381,10 +438,11 @@ async def register_password(
         )
 
     existing = await db.get(PasswordCredential, user.id)
+    new_hash = await _hash_password_async(body.password)
     if existing is None:
-        db.add(PasswordCredential(user_id=user.id, password_hash=hash_password(body.password)))
+        db.add(PasswordCredential(user_id=user.id, password_hash=new_hash))
     else:
-        existing.password_hash = hash_password(body.password)
+        existing.password_hash = new_hash
     if invite:
         await _consume_invite(db, invite, user.id)
     await db.flush()
@@ -409,14 +467,20 @@ async def login_password(
     cred = await db.get(
         PasswordCredential, user.id if (user and not user.disabled) else _DUMMY_UUID
     )
-    ok = verify_password(cred.password_hash if cred else _DUMMY_PASSWORD_HASH, body.password)
+    ok = await _verify_password_async(
+        cred.password_hash if cred else _DUMMY_PASSWORD_HASH, body.password
+    )
     if not (cred and ok):
         if user is not None:
             _acct_fail_limiter.allow(_acct_key(user.id))  # record the strike
         raise HTTPException(401, "Incorrect username or password")
     # Second factor, if the account has confirmed TOTP. Passkey login skips this
-    # (a passkey is already a strong second factor on its own).
-    totp = await db.get(TotpCredential, user.id)
+    # (a passkey is already a strong second factor on its own). The row is
+    # locked for the transaction so two concurrent logins can't both consume the
+    # same recovery code or both accept the same TOTP step.
+    totp = await db.scalar(
+        select(TotpCredential).where(TotpCredential.user_id == user.id).with_for_update()
+    )
     if totp is not None and totp.confirmed_at is not None:
         if not body.code:
             # Signal the client to prompt for a code, then resubmit. Not a strike.
@@ -450,6 +514,8 @@ async def _revoke_other_sessions(request: Request, db: AsyncSession, user_id) ->
         .where(AuthSession.user_id == user_id, AuthSession.token_hash != current_hash)
         .values(revoked=True)
     )
+    # A revoked session's open WebSocket would otherwise keep streaming.
+    await manager.disconnect_user_except(user_id, current_hash)
 
 
 @router.post("/password")
@@ -462,13 +528,17 @@ async def set_password(
     cred = await db.get(PasswordCredential, user.id)
     if cred is not None:
         # Changing an existing password requires the current one.
-        if not body.current_password or not verify_password(
+        if not body.current_password or not await _verify_password_async(
             cred.password_hash, body.current_password
         ):
             raise HTTPException(403, "Current password is incorrect")
-        cred.password_hash = hash_password(body.password)
+        cred.password_hash = await _hash_password_async(body.password)
     else:
-        db.add(PasswordCredential(user_id=user.id, password_hash=hash_password(body.password)))
+        db.add(
+            PasswordCredential(
+                user_id=user.id, password_hash=await _hash_password_async(body.password)
+            )
+        )
     await _revoke_other_sessions(request, db, user.id)
     return {"ok": True}
 
@@ -504,8 +574,18 @@ def verify_second_factor(totp: TotpCredential, code: str | None) -> bool:
     code = (code or "").strip().replace(" ", "").replace("-", "").lower()
     if not code:
         return False
-    if code.isdigit() and pyotp.TOTP(totp.secret).verify(code, valid_window=1):
-        return True
+    if code.isdigit():
+        # Find WHICH 30s step the code matches (current, previous or next for
+        # clock skew), then require it to be newer than the last accepted step:
+        # a code is single-use even inside its acceptance window (replay).
+        gen = pyotp.TOTP(totp.secret)
+        now_step = int(time.time()) // 30
+        for step in (now_step, now_step - 1, now_step + 1):
+            if secrets.compare_digest(gen.at(step * 30), code):
+                if totp.last_used_step is not None and step <= totp.last_used_step:
+                    return False
+                totp.last_used_step = step
+                return True
     h = hash_token(code)
     if h in (totp.recovery_codes or []):
         totp.recovery_codes = [c for c in totp.recovery_codes if c != h]
@@ -618,6 +698,9 @@ async def logout(
     )
     if session:
         session.revoked = True
+        # Close the WebSocket this session opened; it authenticated once at
+        # connect and would otherwise keep receiving messages after logout.
+        await manager.disconnect_token(session.token_hash)
     return {"ok": True}
 
 
@@ -766,3 +849,4 @@ async def revoke_session(
     if session is None or session.user_id != user.id:
         raise HTTPException(404, "Session not found")
     session.revoked = True
+    await manager.disconnect_token(session.token_hash)

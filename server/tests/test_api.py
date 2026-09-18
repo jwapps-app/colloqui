@@ -835,7 +835,7 @@ async def test_push_subscribe(client, make_user):
     a_tok, a_id = await make_user("paul")
     b_tok, b_id = await make_user("quinn")
 
-    sub = {"endpoint": "https://push.example/abc",
+    sub = {"endpoint": "https://8.8.8.8/abc",
            "keys": {"p256dh": "KEYP", "auth": "KEYA"}}
     assert (await client.post("/api/v1/push/subscribe", headers=auth(a_tok),
             json=sub)).status_code == 204
@@ -934,9 +934,9 @@ async def test_web_push_send(monkeypatch, make_user):
 
     _, c_id = await make_user("sam")
     async with SessionLocal() as db:
-        db.add(PushSubscription(endpoint="https://push/LIVE", user_id=c_id,
+        db.add(PushSubscription(endpoint="https://8.8.8.8/LIVE", user_id=c_id,
                                 p256dh="P", auth="A"))
-        db.add(PushSubscription(endpoint="https://push/DEAD", user_id=c_id,
+        db.add(PushSubscription(endpoint="https://8.8.8.8/DEAD", user_id=c_id,
                                 p256dh="P", auth="A"))
         await db.commit()
 
@@ -965,7 +965,7 @@ async def test_web_push_send(monkeypatch, make_user):
     async with SessionLocal() as db:
         left = [s.endpoint for s in (await db.scalars(
             select(PushSubscription).where(PushSubscription.user_id == c_id))).all()]
-    assert left == ["https://push/LIVE"]  # DEAD was pruned
+    assert left == ["https://8.8.8.8/LIVE"]  # DEAD was pruned
 
 
 async def test_read_channel_notifications(client, make_user):
@@ -1118,17 +1118,23 @@ async def test_totp_2fa_flow(client, make_user):
                           json={"username": "totpuser", "password": pw})
     assert r.status_code == 401 and r.json()["detail"] == "mfa_required"
     # a live TOTP code works
+    import time
+    t = time.time()
+    code = pyotp.TOTP(secret).at(t)
     r = await client.post("/api/v1/auth/login/password",
-                          json={"username": "totpuser", "password": pw,
-                                "code": pyotp.TOTP(secret).now()})
+                          json={"username": "totpuser", "password": pw, "code": code})
     assert r.status_code == 200 and r.json().get("token")
+    # ...but only once: replaying the same code inside its window is refused
+    r = await client.post("/api/v1/auth/login/password",
+                          json={"username": "totpuser", "password": pw, "code": code})
+    assert r.status_code == 401
     # a recovery code works once, then is consumed
     body = {"username": "totpuser", "password": pw, "code": rc["recovery_codes"][0]}
     assert (await client.post("/api/v1/auth/login/password", json=body)).status_code == 200
     assert (await client.post("/api/v1/auth/login/password", json=body)).status_code == 401
-    # disabling requires a code, then password login is single-factor again
+    # disabling requires a (fresh, next-step) code, then login is single-factor
     assert (await client.post("/api/v1/auth/totp/disable", headers=auth(tok),
-                              json={"code": pyotp.TOTP(secret).now()})).status_code == 204
+                              json={"code": pyotp.TOTP(secret).at(t + 30)})).status_code == 204
     r = await client.post("/api/v1/auth/login/password",
                           json={"username": "totpuser", "password": pw})
     assert r.status_code == 200
@@ -1199,3 +1205,110 @@ async def test_reminder_recurrence_and_edit(client, make_user):
     other_tok, _ = await make_user("remuser2")
     assert (await client.patch(f"/api/v1/reminders/{r['id']}", headers=auth(other_tok),
             json={"text": "nope"})).status_code == 404
+
+
+# ---- Regressions from the September 2026 external audit ----
+
+
+async def _space_with(client, admin_tok, *member_ids):
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin_tok), json={"name": "R"})).json()
+    for uid in member_ids:
+        await client.post(f"/api/v1/spaces/{sp['id']}/members", headers=auth(admin_tok),
+                          json={"user_id": str(uid)})
+    return sp
+
+
+async def test_long_names_do_not_break_send(client, make_user):
+    """H07: a max-length display name + max-length channel name built a
+    notification title longer than its column, which failed the insert AFTER
+    the message was broadcast and rolled the whole send back (HTTP 500)."""
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("longname")
+    b_tok, b_id = await make_user("recipient")
+    sp = await _space_with(client, admin_tok, a_id, b_id)
+    assert (await client.patch("/api/v1/users/me", headers=auth(a_tok),
+                               json={"display_name": "D" * 64})).status_code == 200
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "c" * 50, "space_id": sp["id"]})).json()
+    await client.post(f"/api/v1/channels/{ch['id']}/members", headers=auth(a_tok),
+                      json={"user_id": str(b_id)})
+    r = await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+                          json={"content": "@recipient hello"})
+    assert r.status_code == 201, r.text
+    # The message really persisted (not broadcast-then-rolled-back).
+    hist = (await client.get(f"/api/v1/channels/{ch['id']}/messages", headers=auth(b_tok))).json()
+    assert any(m["id"] == r.json()["id"] for m in hist)
+    # And the notification landed, with its title clamped to the column width.
+    notes = (await client.get("/api/v1/notifications", headers=auth(b_tok))).json()
+    assert notes and all(len(n["title"]) <= 100 for n in notes)
+
+
+async def test_removed_member_stops_getting_thread_notifications(client, make_user):
+    """H02: thread recipients were derived from historical authors, so a
+    member removed from a private channel kept receiving new reply text."""
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("owner")
+    b_tok, b_id = await make_user("leaver")
+    sp = await _space_with(client, admin_tok, a_id, b_id)
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "priv", "space_id": sp["id"], "is_private": True})).json()
+    await client.post(f"/api/v1/channels/{ch['id']}/members", headers=auth(a_tok),
+                      json={"user_id": str(b_id)})
+    root = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+            json={"content": "root"})).json()
+    # b participates in the thread, so b is a historical participant
+    assert (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(b_tok),
+            json={"content": "first reply", "thread_root_id": root["id"]})).status_code == 201
+    # ...then b is removed
+    assert (await client.delete(f"/api/v1/channels/{ch['id']}/members/{b_id}",
+            headers=auth(a_tok))).status_code == 204
+    assert (await client.get(f"/api/v1/channels/{ch['id']}/messages",
+            headers=auth(b_tok))).status_code == 404
+    # a reply after removal must NOT reach b's inbox
+    await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+                      json={"content": "SECRET-AFTER-REMOVAL", "thread_root_id": root["id"]})
+    notes = (await client.get("/api/v1/notifications", headers=auth(b_tok))).json()
+    assert not any("SECRET-AFTER-REMOVAL" in n["body"] for n in notes)
+
+
+async def test_sync_tombstones_hide_deleted_content(client, make_user):
+    """M01: /sync returned the original text of deleted messages."""
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("author")
+    sp = await _space_with(client, admin_tok, a_id)
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "c", "space_id": sp["id"]})).json()
+    msg = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+           json={"content": "delete me please"})).json()
+    assert (await client.delete(f"/api/v1/messages/{msg['id']}",
+            headers=auth(a_tok))).status_code == 204
+    delta = (await client.get("/api/v1/sync?since=0", headers=auth(a_tok))).json()
+    stone = next(m for m in delta["messages"] if m["id"] == msg["id"])
+    assert stone["deleted_at"] is not None
+    assert stone["content"] == "" and stone["file"] is None
+
+
+async def test_delete_space_creator_succeeds(client, make_user):
+    """M14: deleting a user who created a space hit a NOT NULL / SET NULL
+    conflict on spaces.created_by and returned 500."""
+    admin1_tok, admin1_id = await make_user("admin1", is_admin=True)
+    admin2_tok, _ = await make_user("admin2", is_admin=True)
+    sp = (await client.post("/api/v1/spaces", headers=auth(admin1_tok), json={"name": "Owned"})).json()
+    assert (await client.delete(f"/api/v1/admin/users/{admin1_id}",
+            headers=auth(admin2_tok))).status_code == 204
+    names = [s["name"] for s in (await client.get("/api/v1/spaces", headers=auth(admin2_tok))).json()]
+    assert "Owned" in names  # the space survived, reassigned
+
+
+async def test_push_subscribe_rejects_internal_endpoints(client, make_user):
+    """H01: the push endpoint is caller-supplied and the server POSTs to it, so
+    anything but a public https push service is a server-side request forgery."""
+    tok, _ = await make_user("pusher")
+    keys = {"p256dh": "P", "auth": "A"}
+    for bad in ("https://127.0.0.1/x", "https://169.254.169.254/x",
+                "http://8.8.8.8/x", "https://10.0.0.5/x"):
+        r = await client.post("/api/v1/push/subscribe", headers=auth(tok),
+                              json={"endpoint": bad, "keys": keys})
+        assert r.status_code == 400, bad
+    assert (await client.post("/api/v1/push/subscribe", headers=auth(tok),
+            json={"endpoint": "https://8.8.8.8/ok", "keys": keys})).status_code == 204

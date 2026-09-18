@@ -17,10 +17,12 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '123';
+const APP_VERSION = '124';
 async function checkForUpdate() {
   try {
-    const html = await (await fetch('/?_=' + Date.now(), { cache: 'no-store' })).text();
+    // Plain URL with cache: 'no-store' (a unique ?_= query used to leave a new
+    // service-worker cache entry behind on every check).
+    const html = await (await fetch('/', { cache: 'no-store' })).text();
     const m = html.match(/app\.js\?v=(\d+)/);
     if (!m) return;
     if (m[1] === APP_VERSION) { sessionStorage.removeItem('updTries'); return; }
@@ -438,22 +440,34 @@ function onSignedIn(result) {
 }
 
 function signOutLocal() {
-  token = null; me = null; currentChannel = null; spaces = [];
+  // Single cleanup path for BOTH explicit logout and a forced sign-out (401 /
+  // revocation): every overlay, every cached blob, every account-scoped bit of
+  // state goes, so the next account on this device can't see the last one's.
+  token = null; me = null; currentChannel = null; spaces = []; channels = [];
   localStorage.removeItem('token');
   presence.clear(); typers.clear();
   notifUnread = 0;
-  if (sock) { sock.close(); sock = null; }
+  _pushSetupDone = false;   // the next login must re-establish push ownership
+  if (sock) { sock.onclose = null; sock.close(); sock = null; }
+  clearInterval(wsPingTimer);
   resolveDialog(false);
-  $('account').classList.add('hidden');
-  $('settings').classList.add('hidden');
-  $('space').classList.add('hidden');
-  $('members').classList.add('hidden');
-  $('notifs').classList.add('hidden');
-  $('tasks').classList.add('hidden');
+  for (const id of ['account', 'settings', 'space', 'members', 'notifs', 'tasks',
+                    'pins', 'threads-inbox']) {
+    const el = $(id); if (el) el.classList.add('hidden');
+  }
   closeWhen(null);
   closePreview();
   closeInfoPane();
   closeThread();
+  // Drop rendered conversation + list DOM and every cached file/avatar blob.
+  for (const id of ['messages', 'spaces-container', 'dm-list', 'pins-list',
+                    'threads-list', 'info-content']) {
+    const el = $(id); if (el) el.innerHTML = '';
+  }
+  for (const entry of imageUrls.values()) { try { URL.revokeObjectURL(entry.url); } catch {} }
+  imageUrls.clear();
+  for (const url of avatarCache.values()) { try { URL.revokeObjectURL(url); } catch {} }
+  avatarCache.clear();
   $('app').classList.add('hidden');
   $('auth').classList.remove('hidden');
 }
@@ -514,18 +528,23 @@ function serializeEditor() {
 function clearEditor() { $('send-input').innerHTML = ''; }
 
 // Per-channel unsent drafts, kept in localStorage.
+// Drafts are keyed by account AND channel: keyed by channel alone, the next
+// person to sign in on a shared device would have the last one's unsent text
+// restored into the same channel's composer.
+function draftKey(channelId) { return `draft:${me ? me.id : 'anon'}:${channelId}`; }
+
 function saveDraft() {
   if (!currentChannel || editingMessageId) return;
   const content = serializeEditor();
-  if (content) localStorage.setItem('draft:' + currentChannel.id, content);
-  else localStorage.removeItem('draft:' + currentChannel.id);
+  if (content) localStorage.setItem(draftKey(currentChannel.id), content);
+  else localStorage.removeItem(draftKey(currentChannel.id));
 }
 function restoreDraft(channelId) {
   clearEditor();
-  const d = localStorage.getItem('draft:' + channelId);
+  const d = localStorage.getItem(draftKey(channelId));
   if (d) fillEditor(d);
 }
-function clearDraft(channelId) { localStorage.removeItem('draft:' + channelId); }
+function clearDraft(channelId) { localStorage.removeItem(draftKey(channelId)); }
 
 function updateToolbar() {
   for (const cmd of ['bold', 'italic', 'strikeThrough']) {
@@ -927,6 +946,9 @@ async function selectChannel(ch) {
   setComposerEnabled(true);
   if (!editingMessageId) restoreDraft(ch.id);
   const messages = await api(`/channels/${ch.id}/messages?limit=100`);
+  // A slower request for a channel you've since left must not paint its
+  // history under the channel you're now looking at.
+  if (!currentChannel || currentChannel.id !== ch.id) return;
   const box = $('messages');
   box.innerHTML = '';
   messages.forEach(renderMessage);
@@ -1589,12 +1611,15 @@ async function renderPdfPages(pdf, box, gen) {
 async function renderPdf(entry, box, gen) {
   if (!window.pdfjsLib) throw new Error('PDF viewer failed to load');
   if (!_pdfWorkerSet) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js?v=121';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs?v=124';
     _pdfWorkerSet = true;
   }
   const data = await entry.blob.arrayBuffer();
   if (gen !== _viewerGen) return;
-  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  // isEvalSupported: false — never compile font programs with new Function,
+  // the code path behind CVE-2024-4367. The CSP already forbids eval; this
+  // makes the viewer safe even if that header were ever relaxed.
+  const pdf = await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
   if (gen !== _viewerGen) { pdf.destroy(); return; }
   _pdfDoc = pdf;
   await renderPdfPages(pdf, box, gen);
@@ -3022,6 +3047,8 @@ function handleEvent(data) {
     // Sync this client's state to the fresh socket (server assumes active).
     myPresence = 'active';
     if (document.hidden) sendPresence('away'); else armIdle();
+    if (wsEverConnected) resyncAfterReconnect();
+    wsEverConnected = true;
   } else if (data.type === 'presence') {
     if (data.state && data.state !== 'offline') presence.set(data.user_id, data.state);
     else presence.delete(data.user_id);
@@ -3102,9 +3129,15 @@ function handleEvent(data) {
     if (msgAffectsTasks(m)) scheduleTaskCount();
   } else if (data.type === 'message.updated') {
     const id = data.message.id;
+    // Remember whether the OLD rendering had a task line: an edit that removes
+    // the last checkbox must refresh counts too, not just one that adds one.
+    let hadTask = false;
     if (currentChannel && data.message.channel_id === currentChannel.id) {
       const el = document.querySelector(`#messages .msg[data-id="${id}"]`);
-      if (el) el.replaceWith(buildMessageNode(data.message));
+      if (el) {
+        hadTask = !!el.querySelector('.task-line, input[type="checkbox"]');
+        el.replaceWith(buildMessageNode(data.message));
+      }
     }
     const tp = document.querySelector(`#thread-content .msg[data-id="${id}"]`);
     if (tp) {
@@ -3112,8 +3145,7 @@ function handleEvent(data) {
       if (tp.classList.contains('thread-root-msg')) fresh.classList.add('thread-root-msg');
       tp.replaceWith(fresh);
     }
-    // An edit only changes task counts if the message has a checkbox.
-    if (msgAffectsTasks(data.message)) scheduleTaskCount();
+    if (hadTask || msgAffectsTasks(data.message)) scheduleTaskCount();
   } else if (data.type === 'message.deleted') {
     document.querySelectorAll(`.msg[data-id="${data.message.id}"]`).forEach(el => el.remove());
     const c = $('thread-count');
@@ -3182,24 +3214,59 @@ document.addEventListener('visibilitychange', () => {
 });
 
 let wsPingTimer = null;
+let wsEverConnected = false;   // a later 'ready' is a RE-connect: resync state
+let wsRetryMs = 3000;          // reconnect backoff, reset on a good connection
+let wsPongDue = 0;             // ms timestamp by which a pong must arrive
 function connectWs() {
-  if (sock) sock.close();
+  if (sock) { sock.onclose = null; sock.close(); }
   clearInterval(wsPingTimer);
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  sock = new WebSocket(`${proto}//${location.host}/api/v1/ws`);
-  sock.onopen = () => {
-    sock.send(JSON.stringify({ token }));
+  const s = new WebSocket(`${proto}//${location.host}/api/v1/ws`);
+  sock = s;
+  // Handlers close over THIS socket, so a stale socket's close can't restart
+  // or clear the timers of a newer connection.
+  s.onopen = () => {
+    if (sock !== s) return;
+    s.send(JSON.stringify({ token }));
+    wsRetryMs = 3000;
     // Keep the socket alive through Cloudflare Tunnel's ~100s idle timeout, and
-    // detect a silently dropped connection so we reconnect promptly.
+    // detect a silently dropped (half-open) connection: a ping must be answered
+    // by the next tick or we treat the socket as dead and reconnect.
     clearInterval(wsPingTimer);
+    wsPongDue = 0;
     wsPingTimer = setInterval(() => {
-      if (sock && sock.readyState === WebSocket.OPEN) {
-        sock.send(JSON.stringify({ type: 'ping' }));
-      }
+      if (sock !== s || s.readyState !== WebSocket.OPEN) return;
+      if (wsPongDue && Date.now() > wsPongDue) { s.close(); return; }  // no pong: dead
+      wsPongDue = Date.now() + 25000;
+      s.send(JSON.stringify({ type: 'ping' }));
     }, 30000);
   };
-  sock.onmessage = ev => handleEvent(JSON.parse(ev.data));
-  sock.onclose = () => { clearInterval(wsPingTimer); if (token) setTimeout(connectWs, 3000); };
+  s.onmessage = ev => {
+    if (sock !== s) return;
+    const data = JSON.parse(ev.data);
+    if (data.type === 'pong') { wsPongDue = 0; return; }
+    handleEvent(data);
+  };
+  s.onclose = () => {
+    if (sock !== s) return;
+    clearInterval(wsPingTimer);
+    if (!token) return;
+    setTimeout(connectWs, wsRetryMs);
+    wsRetryMs = Math.min(wsRetryMs * 2, 60000);
+  };
+}
+
+// After a reconnect, anything that happened while the socket was down was
+// missed (the socket is the only live feed). Refresh the channel list (counts)
+// and reload the open conversation so the view catches up.
+async function resyncAfterReconnect() {
+  try {
+    await loadChannels();
+    if (currentChannel) {
+      const ch = channelById(currentChannel.id);
+      if (ch) await selectChannel(ch);
+    }
+  } catch {}
 }
 
 // ---------- settings ----------

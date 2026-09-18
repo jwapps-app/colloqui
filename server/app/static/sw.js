@@ -97,16 +97,23 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
   // Only handle GETs for our own app shell; let everything else (API writes,
-  // file fetches, websockets) use the browser's default handling.
+  // file fetches, websockets) use the browser's default handling. Never cache
+  // the private calendar feed or webhook URLs: a capability URL in the cache
+  // would survive sign-out and be served offline to the next user.
   if (req.method !== 'GET' || url.origin !== self.location.origin
-      || url.pathname.startsWith('/api/')) {
+      || url.pathname.startsWith('/api/')
+      || url.pathname.startsWith('/calendar/')
+      || url.pathname.startsWith('/hooks/')) {
     return;
   }
   event.respondWith(
     fetch(req)
       .then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+        // Cache only good responses; a cached 404/500 would be served offline.
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+        }
         return res;
       })
       .catch(() => caches.match(req))

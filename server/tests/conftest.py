@@ -67,6 +67,7 @@ async def app_module(_create_test_db):
     from sqlalchemy.pool import NullPool
 
     from app import db as dbmod
+    from app import models  # noqa: F401 — register every table before create_all
     from app.config import settings
     from app.db import Base
 

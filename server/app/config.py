@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     dev_mode: bool = False
     upload_dir: str = "/srv/uploads"
     max_file_size_mb: int = 25
+    # Total upload bytes one account may hold; refused past this so a single
+    # member can't fill the NAS volume.
+    max_storage_per_user_mb: int = 2048
     # Release version, stamped into the image at build time (the git tag, e.g.
     # "v1.0.12"). "dev" for local/source builds. Surfaced in the UI footer.
     app_version: str = "dev"

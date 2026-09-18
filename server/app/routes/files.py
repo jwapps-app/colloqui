@@ -4,6 +4,7 @@ from pathlib import Path
 from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -32,6 +33,15 @@ async def upload_file(
     file_id = uuid.uuid4()
     # Blobs are stored under our own UUID — client filenames never touch paths.
     dest = Path(settings.upload_dir) / str(file_id)
+    # Per-user storage quota, checked before we accept more bytes.
+    quota = settings.max_storage_per_user_mb * 1024 * 1024
+    used = await db.scalar(
+        select(func.coalesce(func.sum(File.size_bytes), 0)).where(File.uploader_id == user.id)
+    ) or 0
+    if used >= quota:
+        raise HTTPException(
+            413, f"Storage quota reached ({settings.max_storage_per_user_mb} MB)"
+        )
     size = 0
     try:
         with dest.open("wb") as out:
@@ -41,10 +51,17 @@ async def upload_file(
                     raise HTTPException(
                         413, f"File exceeds the {settings.max_file_size_mb} MB limit"
                     )
+                if used + size > quota:
+                    raise HTTPException(
+                        413, f"Storage quota reached ({settings.max_storage_per_user_mb} MB)"
+                    )
                 # Offload the blocking disk write so a large upload doesn't stall
                 # the event loop (and everyone else's requests) mid-transfer.
                 await to_thread.run_sync(out.write, chunk)
-    except HTTPException:
+    except BaseException:
+        # Any failure or cancellation mid-write (not only our own HTTP errors,
+        # but I/O errors and a disconnecting client too) must not leave an
+        # orphaned blob on disk.
         dest.unlink(missing_ok=True)
         raise
     if size == 0:

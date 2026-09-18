@@ -297,6 +297,9 @@ class Reminder(Base):
     # None = one-shot; else daily|weekly|monthly|yearly. Recurring reminders keep
     # fired_at NULL and roll due_at forward to the next occurrence when they fire.
     recurrence: Mapped[str | None] = mapped_column(String(16))
+    # The original due time a recurring reminder counts from, so month-end and
+    # leap-day anchors don't drift as due_at rolls forward (migration 0023).
+    anchor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Notification(Base):
@@ -483,3 +486,6 @@ class TotpCredential(Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     recovery_codes: Mapped[list] = mapped_column(JSON, default=list)
+    # Last accepted TOTP time-step: a code is single-use even inside its
+    # acceptance window (migration 0023).
+    last_used_step: Mapped[int | None] = mapped_column(BigInteger)

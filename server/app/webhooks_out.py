@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import uuid
-from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import select
@@ -43,15 +42,18 @@ async def _deliver(url: str, secret: str, body: bytes, event_type: str) -> None:
     # since DNS can change): http(s) only, and every resolved address must pass
     # the outbound guard. Loopback, link-local/metadata, reserved and multicast
     # are always refused; LAN hosts are allowed unless WEBHOOK_BLOCK_PRIVATE.
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not await links.host_allowed(
-        parsed.hostname or "", allow_private=not settings.webhook_block_private
-    ):
+    # Resolve + validate, then connect to that exact address (pin_url), so the
+    # request can't reach an internal host even if DNS changes between the
+    # check and the connect. TLS still verifies the real hostname via SNI.
+    pinned = await links.pin_url(url, allow_private=not settings.webhook_block_private)
+    if pinned is None:
         log.warning("outgoing webhook %s -> %s refused: unsafe destination", event_type, url)
         return
+    purl, phdr, pext = pinned
     delivery_id = str(uuid.uuid4())
     sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     headers = {
+        **phdr,
         "Content-Type": "application/json",
         "X-Colloqui-Event": event_type,
         "X-Colloqui-Delivery": delivery_id,
@@ -60,7 +62,7 @@ async def _deliver(url: str, secret: str, body: bytes, event_type: str) -> None:
     client = _http_client()
     for attempt in range(2):  # one retry, then give up
         try:
-            r = await client.post(url, content=body, headers=headers)
+            r = await client.post(purl, content=body, headers=headers, extensions=pext)
             if r.status_code < 500:
                 return
         except Exception:

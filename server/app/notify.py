@@ -27,22 +27,34 @@ def _add_months(dt: datetime, months: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
-def next_occurrence(due: datetime, recurrence: str | None, now: datetime) -> datetime | None:
-    """The first occurrence strictly after `now` for a recurring reminder, or
-    None for a one-shot. Advancing from the fired time skips any occurrences
-    missed while the server was down (fire once, then jump to the future)."""
-    steps = {
-        "daily": lambda d: d + timedelta(days=1),
-        "weekly": lambda d: d + timedelta(weeks=1),
-        "monthly": lambda d: _add_months(d, 1),
-        "yearly": lambda d: _add_months(d, 12),
-    }
-    step = steps.get(recurrence or "")
-    if step is None:
+def next_occurrence(
+    due: datetime, recurrence: str | None, now: datetime, anchor: datetime | None = None
+) -> datetime | None:
+    """The first occurrence strictly after both `due` and `now` for a recurring
+    reminder, or None for a one-shot. Every occurrence is computed as the k-th
+    step FROM THE ANCHOR (the original due time), never from the previously
+    clamped date: Jan 31 monthly is Feb 28, then Mar 31 (not Mar 28), and a
+    Feb 29 yearly returns to Feb 29 in the next leap year. Skipping ahead past
+    `now` means occurrences missed while the server was down fire once, then
+    the reminder jumps to the future."""
+    if not recurrence:
         return None
-    nxt = step(due)
-    while nxt <= now:
-        nxt = step(nxt)
+    anchor = anchor or due
+    if recurrence == "daily":
+        step = lambda k: anchor + timedelta(days=k)  # noqa: E731
+    elif recurrence == "weekly":
+        step = lambda k: anchor + timedelta(weeks=k)  # noqa: E731
+    elif recurrence == "monthly":
+        step = lambda k: _add_months(anchor, k)  # noqa: E731
+    elif recurrence == "yearly":
+        step = lambda k: _add_months(anchor, 12 * k)  # noqa: E731
+    else:
+        return None
+    k = 1
+    nxt = step(k)
+    while nxt <= now or nxt <= due:
+        k += 1
+        nxt = step(k)
     return nxt
 
 
@@ -65,8 +77,12 @@ async def notify_user(
     """
     notification = None
     if inbox:
+        # Clamp to the column widths (title 100, body 500): a 64-char display
+        # name plus a 50-char channel name can build a title that overflows, and
+        # that used to blow up the insert AFTER the message was already
+        # broadcast, rolling the whole send back.
         notification = Notification(
-            user_id=user_id, type=type_, title=title, body=body, data=data
+            user_id=user_id, type=type_, title=title[:100], body=body[:500], data=data
         )
         db.add(notification)
         await db.flush()
@@ -126,7 +142,9 @@ async def reminder_loop() -> None:
                 for reminder in due:
                     # Recurring reminders roll forward and stay pending; one-shots
                     # are marked fired so they don't fire again.
-                    nxt = next_occurrence(reminder.due_at, reminder.recurrence, now)
+                    nxt = next_occurrence(
+                        reminder.due_at, reminder.recurrence, now, reminder.anchor_at
+                    )
                     if nxt is not None:
                         reminder.due_at = nxt
                     else:

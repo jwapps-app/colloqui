@@ -10,7 +10,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .deps import user_from_token
 from .models import ChannelMember, User, utcnow
-from .security import RateLimiter
+from .security import RateLimiter, hash_token
 
 router = APIRouter()
 
@@ -21,6 +21,8 @@ MAX_SOCKETS_PER_USER = 10
 # Bound each WebSocket send. Fan-out is awaited inline on the message-send
 # request path, so one backpressured client must not stall the sender.
 SEND_TIMEOUT = 5.0
+# How often a long-lived socket re-validates its token (catches expiry).
+REVALIDATE_SECONDS = 300
 
 _bg: set[asyncio.Task] = set()
 
@@ -45,24 +47,46 @@ class ConnectionManager:
     def __init__(self) -> None:
         # user_id -> {socket: 'active' | 'away'}
         self._conns: dict[uuid.UUID, dict[WebSocket, str]] = {}
+        # socket -> hash of the session/API-key token it authenticated with, so
+        # revoking that credential can close exactly the sockets it opened.
+        self._token_of: dict[WebSocket, str] = {}
 
-    def add(self, user_id: uuid.UUID, ws: WebSocket) -> None:
+    def add(self, user_id: uuid.UUID, ws: WebSocket, token_hash: str = "") -> None:
         conns = self._conns.setdefault(user_id, {})
         # Over the per-user cap, evict the OLDEST socket (dict order = insertion
         # order) and close it; its own disconnect handler then no-ops on remove.
         while len(conns) >= MAX_SOCKETS_PER_USER:
             oldest = next(iter(conns))
             conns.pop(oldest, None)
+            self._token_of.pop(oldest, None)
             _fire(oldest.close(code=4409))
         conns[ws] = "active"
+        self._token_of[ws] = token_hash
 
     def remove(self, user_id: uuid.UUID, ws: WebSocket) -> None:
+        self._token_of.pop(ws, None)
         conns = self._conns.get(user_id)
         if conns is None:
             return
         conns.pop(ws, None)
         if not conns:
             del self._conns[user_id]
+
+    async def disconnect_token(self, token_hash: str) -> None:
+        """Close every socket that authenticated with this (now revoked) token."""
+        for user_id, conns in list(self._conns.items()):
+            for ws in list(conns):
+                if self._token_of.get(ws) == token_hash:
+                    self.remove(user_id, ws)
+                    _fire(ws.close(code=4401))
+
+    async def disconnect_user_except(self, user_id: uuid.UUID, keep_hash: str) -> None:
+        """Close all of a user's sockets except those on `keep_hash` (the
+        session making a credential change stays connected)."""
+        for ws in list(self._conns.get(user_id, {})):
+            if self._token_of.get(ws) != keep_hash:
+                self.remove(user_id, ws)
+                _fire(ws.close(code=4401))
 
     def set_state(self, user_id: uuid.UUID, ws: WebSocket, state: str) -> None:
         conns = self._conns.get(user_id)
@@ -79,18 +103,27 @@ class ConnectionManager:
         """Snapshot of everyone currently connected, as id -> online|away."""
         return {str(uid): self.presence_of(uid) for uid in self._conns}
 
+    async def _send_one(self, user_id: uuid.UUID, ws: WebSocket, payload: Any) -> None:
+        try:
+            await asyncio.wait_for(ws.send_json(payload), timeout=SEND_TIMEOUT)
+        except asyncio.TimeoutError:
+            # A stalled/backpressured socket: drop it so it can't hold up any
+            # fan-out again. The client reconnects on its own.
+            self.remove(user_id, ws)
+            _fire(ws.close(code=4408))
+        except Exception:
+            pass  # dead socket; the disconnect handler cleans it up
+
     async def send_to_users(self, user_ids: Iterable[uuid.UUID], payload: Any) -> None:
-        for user_id in set(user_ids):
-            for ws in list(self._conns.get(user_id, {})):
-                try:
-                    await asyncio.wait_for(ws.send_json(payload), timeout=SEND_TIMEOUT)
-                except asyncio.TimeoutError:
-                    # A stalled/backpressured socket: drop it so it can't hold up
-                    # this fan-out again. The client reconnects on its own.
-                    self.remove(user_id, ws)
-                    _fire(ws.close(code=4408))
-                except Exception:
-                    pass  # dead socket; the disconnect handler cleans it up
+        # All sockets concurrently, each individually bounded: a delivery pass
+        # costs at most one SEND_TIMEOUT, not one per stalled socket in series.
+        sends = [
+            self._send_one(user_id, ws, payload)
+            for user_id in set(user_ids)
+            for ws in list(self._conns.get(user_id, {}))
+        ]
+        if sends:
+            await asyncio.gather(*sends, return_exceptions=True)
 
     def is_online(self, user_id: uuid.UUID) -> bool:
         return user_id in self._conns
@@ -142,15 +175,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
+    token = first.get("token") if isinstance(first, dict) else None
     async with SessionLocal() as db:
-        user = await user_from_token(db, first.get("token") if isinstance(first, dict) else None)
+        user = await user_from_token(db, token)
         await db.commit()
     if user is None:
         await ws.close(code=4401)
         return
 
     before = manager.presence_of(user.id)
-    manager.add(user.id, ws)
+    manager.add(user.id, ws, hash_token(token))
     await ws.send_json({"type": "ready", "presence": manager.presence_map()})
     after = manager.presence_of(user.id)
     if after != before:
@@ -158,11 +192,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             {"type": "presence", "user_id": str(user.id), "state": after}
         )
     last_typing = 0.0
+    last_check = time.monotonic()
     try:
         while True:
             data = await ws.receive_json()
             if not isinstance(data, dict):
                 continue
+            # A socket authenticates once at connect. Revocations close it
+            # explicitly (see disconnect_token); expiry and anything missed is
+            # caught by re-validating the token periodically on inbound traffic
+            # (clients ping regularly, so this fires on a live connection).
+            if time.monotonic() - last_check > REVALIDATE_SECONDS:
+                last_check = time.monotonic()
+                async with SessionLocal() as db:
+                    still = await user_from_token(db, token)
+                    await db.commit()
+                if still is None:
+                    await ws.close(code=4401)
+                    return
             if data.get("type") == "ping":
                 await ws.send_json({"type": "pong"})
             elif data.get("type") == "presence":

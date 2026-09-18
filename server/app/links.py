@@ -36,11 +36,17 @@ def extract_urls(text: str, limit: int = 3) -> list[str]:
     return seen
 
 
+# Carrier-grade NAT / shared address space. Not "private" in every Python
+# version's ipaddress tables, but never a legitimate public destination.
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
 def ip_allowed(ip_str: str, allow_private: bool = False) -> bool:
     """Is this a safe outbound destination? Loopback, link-local (incl. cloud
     metadata at 169.254.x), reserved, multicast and unspecified are ALWAYS
-    refused. RFC1918 private ranges are refused unless allow_private (used for
-    admin-configured webhooks that legitimately target a LAN host)."""
+    refused. RFC1918 private ranges (and CGNAT space) are refused unless
+    allow_private (used for admin-configured webhooks that legitimately
+    target a LAN host)."""
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -57,7 +63,39 @@ def ip_allowed(ip_str: str, allow_private: bool = False) -> bool:
         or ip.is_unspecified
     ):
         return False
-    return allow_private or not ip.is_private
+    private = ip.is_private or (ip.version == 4 and ip in _CGNAT)
+    return allow_private or not private
+
+
+async def pin_url(url: str, allow_private: bool = False):
+    """Resolve the URL's host, validate EVERY address, and return a request
+    target that connects to one vetted IP. This closes the DNS-rebinding
+    time-of-check/time-of-use gap: the connection goes to the address we
+    checked, not to a fresh lookup the attacker controls. The original host
+    is preserved for TLS (SNI + certificate verification) and the Host header.
+
+    Returns (pinned_url, headers, extensions) or None if the destination is
+    refused or unresolvable.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme not in ("http", "https") or not host:
+        return None
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return None
+    ips = [info[4][0] for info in infos]
+    if not ips or not all(ip_allowed(ip, allow_private) for ip in ips):
+        return None
+    ip = ips[0]
+    netloc = f"[{ip}]" if ":" in ip else ip
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    pinned = parsed._replace(netloc=netloc).geturl()
+    host_hdr = host if parsed.port is None else f"{host}:{parsed.port}"
+    ext = {"sni_hostname": host} if parsed.scheme == "https" else {}
+    return pinned, {"Host": host_hdr}, ext
 
 
 def _ip_is_public(ip_str: str) -> bool:
@@ -114,14 +152,15 @@ async def fetch_metadata(url: str) -> dict | None:
             follow_redirects=False, timeout=_TIMEOUT, headers=_UA
         ) as client:
             for _ in range(_MAX_REDIRECTS):
-                if parsed.scheme not in ("http", "https"):
+                # Connect to the exact address we validated (see pin_url), so
+                # the request can't reach an internal host even if DNS changes
+                # between the check and the connect.
+                pinned = await pin_url(url, allow_private=False)
+                if pinned is None:
                     return None
-                if not await _host_is_public(parsed.hostname or ""):
-                    return None
-                async with client.stream("GET", url) as resp:
-                    # Validate the IP we ACTUALLY connected to, not just the one
-                    # we pre-resolved — a rebinding attacker can return a public
-                    # IP to _host_is_public's lookup and a private one to httpx's.
+                purl, phdr, pext = pinned
+                async with client.stream("GET", purl, headers=phdr, extensions=pext) as resp:
+                    # Belt and braces: also refuse if the peer somehow isn't public.
                     stream = resp.extensions.get("network_stream")
                     peer = stream.get_extra_info("server_addr") if stream else None
                     if peer and not _ip_is_public(peer[0]):

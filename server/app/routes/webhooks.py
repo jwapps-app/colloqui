@@ -12,6 +12,7 @@ from ..models import Channel, ChannelMember, Message, User, Webhook, utcnow
 from ..schemas import WebhookCreatedOut, WebhookIn, WebhookOut, WebhookPostIn
 from ..security import RateLimiter, hash_token, new_token
 from .channels import require_member
+from ..webhooks_out import dispatch_event
 from .messages import _notify_for_message, broadcast, message_out, record_change
 
 router = APIRouter(prefix="/api/v1", tags=["webhooks"])
@@ -130,9 +131,13 @@ async def ingest(
     await db.flush()
     await record_change(db, message)
     out = message_out(message, sender)
+    await db.commit()  # publish only what is durably saved
     await broadcast(
         db, channel.id, {"type": "message.created", "message": jsonable_encoder(out)}
     )
+    # Webhook-posted messages are real messages: integrations subscribed to
+    # message.created should hear about them like any other.
+    dispatch_event("message.created", jsonable_encoder(out))
     if sender is not None:
         await _notify_for_message(db, channel, sender, message.content)
     return {"ok": True}
