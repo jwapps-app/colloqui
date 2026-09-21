@@ -625,6 +625,11 @@ async def totp_setup(
         existing.recovery_codes = []
     else:
         db.add(TotpCredential(user_id=user.id, secret=secret, recovery_codes=[]))
+    # Explicit commit: get_db commits only after the response is sent, and the
+    # user is about to scan this secret into their authenticator — it must be
+    # durably stored before we hand it out (same bug class as the TOTP login
+    # bounce).
+    await db.commit()
     uri = pyotp.TOTP(secret).provisioning_uri(name=user.username, issuer_name="Colloqui")
     buf = io.BytesIO()
     segno.make(uri).save(buf, kind="svg", scale=4, border=2)
@@ -648,6 +653,9 @@ async def totp_confirm(
     display, hashes = _new_recovery_codes()
     totp.confirmed_at = utcnow()
     totp.recovery_codes = hashes
+    # Explicit commit: the user saves these recovery codes the moment they see
+    # them — a failed deferred commit would leave codes that never persisted.
+    await db.commit()
     return RecoveryCodesOut(recovery_codes=display)
 
 
@@ -663,6 +671,7 @@ async def totp_disable(
     if not verify_second_factor(totp, body.code):
         raise HTTPException(400, "Incorrect authentication code")
     await db.delete(totp)
+    await db.commit()
 
 
 @router.post("/totp/recovery-codes", response_model=RecoveryCodesOut)
@@ -678,6 +687,7 @@ async def totp_regen_recovery(
         raise HTTPException(400, "Incorrect authentication code")
     display, hashes = _new_recovery_codes()
     totp.recovery_codes = hashes
+    await db.commit()
     return RecoveryCodesOut(recovery_codes=display)
 
 

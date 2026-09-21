@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -11,6 +11,11 @@ from .models import User
 from .security import RateLimiter, hash_token
 
 auth_limiter = RateLimiter(limit=30, window_seconds=60)
+
+# last_seen/last_used timestamps are for humans ("active 5 minutes ago"), not
+# auditing — refreshing them on EVERY authenticated request turned each GET
+# into a write+commit (WAL churn). Sub-minute precision buys nothing.
+SEEN_REFRESH = timedelta(seconds=60)
 
 
 def client_ip(request: Request) -> str:
@@ -44,7 +49,8 @@ async def user_from_token(db: AsyncSession, token: str | None) -> User | None:
         user = await db.get(User, key.user_id)
         if user is None or user.disabled:
             return None
-        key.last_used_at = now
+        if key.last_used_at is None or now - key.last_used_at > SEEN_REFRESH:
+            key.last_used_at = now
         return user
     session = await db.scalar(
         select(AuthSession).where(AuthSession.token_hash == hash_token(token))
@@ -54,7 +60,8 @@ async def user_from_token(db: AsyncSession, token: str | None) -> User | None:
     user = await db.get(User, session.user_id)
     if user is None or user.disabled:
         return None
-    session.last_seen_at = now
+    if now - session.last_seen_at > SEEN_REFRESH:
+        session.last_seen_at = now
     return user
 
 

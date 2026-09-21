@@ -82,9 +82,16 @@ class RateLimiter:
         self.limit = limit
         self.window = window_seconds
         self._hits: dict[str, list[float]] = {}
+        self._next_prune = 0.0
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
+        # Occasionally drop keys whose hits all expired — per-key pruning alone
+        # let the dict grow unboundedly (one entry per client IP, forever).
+        if now >= self._next_prune:
+            self._next_prune = now + self.window
+            for k in [k for k, ts in self._hits.items() if not ts or now - ts[-1] >= self.window]:
+                del self._hits[k]
         hits = [t for t in self._hits.get(key, []) if now - t < self.window]
         allowed = len(hits) < self.limit
         if allowed:
