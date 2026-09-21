@@ -596,7 +596,9 @@ async def test_push_apns(monkeypatch, make_user):
     class FakeResp:
         def __init__(self, status): self.status_code = status
         def json(self):
-            return {"detail": "APNS error: Unregistered"} if self.status_code == 502 else {"status": "sent"}
+            if self.status_code == 410:
+                return {"detail": "Unregistered", "reason": "Unregistered"}
+            return {"status": "sent"}
 
     class FakeClient:
         def __init__(self, *a, **k): pass
@@ -604,9 +606,12 @@ async def test_push_apns(monkeypatch, make_user):
         async def __aexit__(self, *a): return False
         async def post(self, url, json=None, headers=None):
             sent.append({"url": url, "json": json, "headers": headers})
-            return FakeResp(502 if json["device_token"] == "DEAD" else 200)
+            return FakeResp(410 if json["device_token"] == "DEAD" else 200)
 
     monkeypatch.setattr(push.httpx, "AsyncClient", FakeClient)
+    # The relay client is a cached module global — start clean, and don't leave
+    # the fake behind for later tests.
+    monkeypatch.setattr(push, "_client", None)
     await push._deliver(c_id, "hi", "there", {"channel_id": "x"}, 7)
 
     # Posted to the relay's /notify with our API key, correct topic + per-token sandbox flag.

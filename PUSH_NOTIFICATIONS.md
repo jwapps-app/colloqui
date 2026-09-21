@@ -61,7 +61,7 @@ from .models import DeviceToken
 
 log = logging.getLogger("push")
 
-# Reasons the relay returns (passed through from Apple) that mean "drop it".
+# `reason` values on a relay 410 that mean "drop it".
 _DEAD = {"BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"}
 
 
@@ -105,16 +105,20 @@ async def _deliver(user_id, title, body, data, badge) -> None:
                     continue
                 if resp.status_code == 200:
                     continue
-                reason = ""
-                try:
-                    reason = resp.json().get("detail", "")
-                except Exception:
-                    pass
-                if any(r in reason for r in _DEAD):
+                # Prune ONLY on a 410 with an exact `reason` — see "Relay error
+                # contract" below. (The shipped push.py also retries
+                # BadDeviceToken against the other environment first.)
+                reason = None
+                if resp.status_code == 410:
+                    try:
+                        reason = resp.json().get("reason")
+                    except Exception:
+                        pass
+                if reason in _DEAD:
                     dead.append(dt.token)
                 else:
-                    log.warning("relay %s (%s) for token %s…",
-                                resp.status_code, reason, dt.token[:8])
+                    log.warning("relay %s for token %s…",
+                                resp.status_code, dt.token[:8])
         if dead:
             await db.execute(delete(DeviceToken).where(DeviceToken.token.in_(dead)))
             await db.commit()
@@ -135,6 +139,45 @@ def schedule(user_id: uuid.UUID, title: str, body: str,
         return
     asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))
 ```
+
+---
+
+### Relay error contract (what `push.py` acts on)
+
+The sketch above is the original reroute; the shipped `app/push.py` has since
+grown a shared client, concurrent fan-out and the handling below. `POST /notify`
+answers:
+
+| Status | Body | What `push.py` does |
+|---|---|---|
+| `200` | `{"status":"sent","response_ms":N}` | counted as sent |
+| `410` | `{"detail":R,"reason":R}`, `R` ∈ `BadDeviceToken` / `Unregistered` / `DeviceTokenNotForTopic` | the **only** response that can delete a device token (see below) |
+| `413` | `{"detail":"Payload too large for APNs"}` | logged, token kept — shouldn't happen, the alert is truncated first |
+| `422` | `{"detail":[…]}` — a list that **echoes request values** | logged (status only), token kept |
+| `429` | rate limited, may carry `Retry-After` | logged at WARNING with the `Retry-After`, token kept, no retry |
+| `502` | `{"detail":"APNs delivery failed"}` — deliberately generic | logged, token kept |
+
+- **Pruning is exact.** A token is deleted only when the status is `410` *and*
+  the JSON `reason` equals one of the three strings. `detail` is never searched:
+  a 422 echoes the message text back, so a chat message that merely says
+  "Unregistered" must not be able to delete a live token. (The relay used to
+  tuck Apple's reason into a 502 `detail`; that contract is gone.)
+- **`BadDeviceToken` gets one retry in the other environment.** Apple answers
+  `BadDeviceToken` for a perfectly good token sent to the wrong environment
+  (a TestFlight token stored as `sandbox`, a dev-signed build stored as
+  `production`). Apple delivered nothing, so a retry can't double-notify. If the
+  retry succeeds the row's `environment` is corrected and the push counts as
+  sent; if it is also token-fatal the token is deleted; anything else (502, 429,
+  network error) is inconclusive and the token is kept as it was.
+  `Unregistered` and `DeviceTokenNotForTopic` prune immediately.
+- **Long messages are truncated for the alert only.** Apple caps the payload at
+  4096 bytes. The push title is capped at 100 characters and the body at 300
+  (ending in `…`), and the body is trimmed further, a whole character at a time,
+  until title + body + custom data serialize to ≤ 3500 bytes *as the relay
+  encodes them* (`json.dumps` ASCII-escapes, so an emoji costs 12 bytes, CJK 6).
+  The stored message, the inbox entry and the custom keys (`channel_id`,
+  `root_id`, `message_id`, `reminder_id`, …) are untouched; the iOS app never
+  reads the alert text, it deep-links from the custom keys.
 
 ---
 
