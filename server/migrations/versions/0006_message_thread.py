@@ -28,6 +28,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_messages_thread_root_id", table_name="messages")
-    op.drop_constraint("fk_messages_thread_root", "messages", type_="foreignkey")
-    op.drop_column("messages", "thread_root_id")
+    # Column drops take their index and FK with them, whatever the FK is
+    # named (a fresh install's create_all auto-names it).
+    op.execute("DROP INDEX IF EXISTS ix_messages_thread_root_id")
+    op.execute("ALTER TABLE messages DROP COLUMN IF EXISTS thread_root_id")

@@ -280,6 +280,7 @@ async def remove_space_member(
     member = await db.get(SpaceMember, (space_id, user_id))
     if member is None:
         raise HTTPException(404, "Member not found")
+    was_manager = member.role == "manager"
     await db.delete(member)
     # Drop their membership of every channel in this space in one statement.
     await db.execute(
@@ -291,4 +292,39 @@ async def remove_space_member(
         )
     )
     await db.flush()
+    if was_manager:
+        await _ensure_space_manager(db, space_id)
+    # Channels they owned in this space need an owner too.
+    from .channels import _ensure_channel_owner
+
+    owned = await db.scalars(
+        select(Channel.id).where(
+            Channel.space_id == space_id, Channel.is_dm == False  # noqa: E712
+        )
+    )
+    for cid in owned.all():
+        await _ensure_channel_owner(db, cid)
     await manager.send_to_users([user_id], {"type": "channels.changed"})
+
+
+async def _ensure_space_manager(db: AsyncSession, space_id: uuid.UUID) -> None:
+    """If a space is left with members but no manager, the longest-standing
+    member inherits the role so the space never depends on a server admin for
+    routine membership changes."""
+    has_mgr = await db.scalar(
+        select(SpaceMember.user_id).where(
+            SpaceMember.space_id == space_id, SpaceMember.role == "manager"
+        ).limit(1)
+    )
+    if has_mgr is not None:
+        return
+    heir = await db.scalar(
+        select(SpaceMember)
+        .where(SpaceMember.space_id == space_id)
+        .order_by(SpaceMember.joined_at, SpaceMember.user_id)
+        .limit(1)
+    )
+    if heir is not None:
+        heir.role = "manager"
+        await db.flush()
+        await manager.send_to_users([heir.user_id], {"type": "channels.changed"})

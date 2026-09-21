@@ -17,7 +17,7 @@ if ('serviceWorker' in navigator) {
 // fetch the live index.html, and if it references a newer build than the one
 // running, reload — which goes through the service worker and pulls the fresh
 // version. A per-session cap prevents reload loops.
-const APP_VERSION = '124';
+const APP_VERSION = '125';
 async function checkForUpdate() {
   try {
     // Plain URL with cache: 'no-store' (a unique ?_= query used to leave a new
@@ -765,6 +765,7 @@ function channelLi(ch) {
   }
   if (currentChannel && currentChannel.id === ch.id) li.classList.add('active');
   li.onclick = () => selectChannel(ch);
+  keyboardActivatable(li, () => selectChannel(ch));
   return li;
 }
 
@@ -850,6 +851,8 @@ function renderChannels() {
     name.textContent = sp.name;
     toggle.appendChild(name);
     toggle.onclick = () => toggleSpaceCollapsed(sp.id);
+    keyboardActivatable(toggle, () => toggleSpaceCollapsed(sp.id));
+    toggle.setAttribute('aria-expanded', String(!collapsed));
     h3.appendChild(toggle);
     const btns = document.createElement('span');
     btns.className = 'space-side';
@@ -2164,6 +2167,7 @@ function threadSummaryEl(m) {
     el.appendChild(last);
   }
   el.onclick = () => openThread(m);
+  keyboardActivatable(el, () => openThread(m));
   return el;
 }
 
@@ -3178,6 +3182,9 @@ function handleEvent(data) {
     if (currentChannel && data.channel_id === currentChannel.id) scheduleInfoPane();
   } else if (data.type === 'pins.changed') {
     if (currentChannel && data.channel_id === currentChannel.id) scheduleInfoPane();
+    // The sidebar's pinned count and the pins-icon state come from the channel
+    // list; refresh it so a pin/unpin shows up there too, not just in the pane.
+    loadChannels().catch(() => {});
   }
 }
 
@@ -4384,6 +4391,36 @@ const ICON_PATHS = {
 function svgIcon(name, cls) {
   return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ''}</svg>`;
 }
+// Make a clickable non-button element usable from the keyboard: focusable,
+// announced as a button, and activated by Enter or Space.
+function keyboardActivatable(el, fn) {
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); }
+  });
+}
+
+// Overlays are dialogs: announce them as such, name them from their heading,
+// and mark them modal so assistive tech treats the background as inert.
+function initDialogSemantics() {
+  document.querySelectorAll('.overlay').forEach(ov => {
+    ov.setAttribute('role', 'dialog');
+    ov.setAttribute('aria-modal', 'true');
+    const h = ov.querySelector('h2, h1');
+    if (h) {
+      if (!h.id) h.id = 'dlg-title-' + (ov.id || Math.random().toString(36).slice(2));
+      ov.setAttribute('aria-labelledby', h.id);
+    }
+  });
+  // Placeholder-only inputs get a programmatic label from that placeholder.
+  document.querySelectorAll('input[placeholder]:not([aria-label]), textarea[placeholder]:not([aria-label])')
+    .forEach(i => { if (!i.labels || !i.labels.length) i.setAttribute('aria-label', i.placeholder); });
+  // Icon-only buttons already carry a title; expose it as the accessible name.
+  document.querySelectorAll('button[title]:not([aria-label])')
+    .forEach(b => { if (!b.textContent.trim()) b.setAttribute('aria-label', b.title); });
+}
+
 function initNavIcons() {
   const byId = {
     'threads-btn': 'threads', 'pins-btn': 'pin', 'tasks-btn': 'checklist',
@@ -4402,3 +4439,4 @@ function initNavIcons() {
   });
 }
 initNavIcons();
+initDialogSemantics();

@@ -1293,7 +1293,7 @@ async def test_delete_space_creator_succeeds(client, make_user):
     conflict on spaces.created_by and returned 500."""
     admin1_tok, admin1_id = await make_user("admin1", is_admin=True)
     admin2_tok, _ = await make_user("admin2", is_admin=True)
-    sp = (await client.post("/api/v1/spaces", headers=auth(admin1_tok), json={"name": "Owned"})).json()
+    (await client.post("/api/v1/spaces", headers=auth(admin1_tok), json={"name": "Owned"})).json()
     assert (await client.delete(f"/api/v1/admin/users/{admin1_id}",
             headers=auth(admin2_tok))).status_code == 204
     names = [s["name"] for s in (await client.get("/api/v1/spaces", headers=auth(admin2_tok))).json()]
@@ -1312,3 +1312,45 @@ async def test_push_subscribe_rejects_internal_endpoints(client, make_user):
         assert r.status_code == 400, bad
     assert (await client.post("/api/v1/push/subscribe", headers=auth(tok),
             json={"endpoint": "https://8.8.8.8/ok", "keys": keys})).status_code == 204
+
+
+async def test_owner_leaving_hands_channel_to_longest_member(client, make_user):
+    """L06: a channel must never be left with members but no owner."""
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("first_owner")
+    b_tok, b_id = await make_user("heir")
+    sp = await _space_with(client, admin_tok, a_id, b_id)
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "hand", "space_id": sp["id"], "is_private": True})).json()
+    await client.post(f"/api/v1/channels/{ch['id']}/members", headers=auth(a_tok),
+                      json={"user_id": str(b_id)})
+    assert (await client.delete(f"/api/v1/channels/{ch['id']}/members/me",
+            headers=auth(a_tok))).status_code == 204
+    mine = next(c for c in (await client.get("/api/v1/channels", headers=auth(b_tok))).json()
+                if c["id"] == ch["id"])
+    assert mine["my_role"] == "owner"
+
+
+async def test_deleted_thread_root_is_readable_but_closed(client, make_user):
+    """L06: replies under a deleted root stay reachable (tombstone root), but
+    the thread accepts no new posts, even via a surviving reply."""
+    admin_tok, _ = await make_user("admin", is_admin=True)
+    a_tok, a_id = await make_user("threader")
+    sp = await _space_with(client, admin_tok, a_id)
+    ch = (await client.post("/api/v1/channels", headers=auth(a_tok),
+          json={"name": "t", "space_id": sp["id"]})).json()
+    root = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+            json={"content": "root"})).json()
+    reply = (await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+             json={"content": "reply", "thread_root_id": root["id"]})).json()
+    assert (await client.delete(f"/api/v1/messages/{root['id']}",
+            headers=auth(a_tok))).status_code == 204
+    thread = (await client.get(f"/api/v1/messages/{root['id']}/thread", headers=auth(a_tok)))
+    assert thread.status_code == 200
+    items = thread.json()
+    assert items[0]["id"] == root["id"] and items[0]["deleted_at"] and items[0]["content"] == "(message deleted)"
+    assert any(m["id"] == reply["id"] for m in items)
+    # posting via the surviving reply is refused now that the root is gone
+    r = await client.post(f"/api/v1/channels/{ch['id']}/messages", headers=auth(a_tok),
+                          json={"content": "late", "thread_root_id": reply["id"]})
+    assert r.status_code == 400

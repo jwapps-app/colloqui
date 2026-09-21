@@ -711,14 +711,16 @@ async def list_thread(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[MessageOut]:
-    """The root message followed by every reply in its thread, oldest first."""
+    """The root message followed by every reply in its thread, oldest first.
+    A deleted root is returned as a tombstone so its live replies stay
+    reachable (the thread accepts no NEW posts, see send_message)."""
     root = await db.get(Message, root_id)
-    if root is None or root.deleted_at is not None:
+    if root is None:
         raise HTTPException(404, "Thread not found")
     # If a reply id was passed, resolve to its actual root.
     if root.thread_root_id is not None:
         root = await db.get(Message, root.thread_root_id)
-        if root is None or root.deleted_at is not None:
+        if root is None:
             raise HTTPException(404, "Thread not found")
     await require_member(db, root.channel_id, user)
     rows = (
@@ -727,24 +729,29 @@ async def list_thread(
             .join(User, User.id == Message.sender_id)
             .outerjoin(File, File.id == Message.file_id)
             .where(
-                Message.deleted_at.is_(None),
-                (Message.id == root.id) | (Message.thread_root_id == root.id),
+                (Message.id == root.id)
+                | ((Message.thread_root_id == root.id) & Message.deleted_at.is_(None)),
             )
             .order_by(Message.created_at, Message.id)
             .limit(2000)  # bound the response; threads never realistically hit this
         )
     ).all()
-    msgs = [m for m, _, _ in rows]
-    ids = [m.id for m in msgs]
+    live = [m for m, _, _ in rows if m.deleted_at is None]
+    ids = [m.id for m in live]
     aggs = await reactions_for(db, ids)
     comps = await completions_for(db, ids)
-    replies = await reply_previews_for(db, msgs)
-    previews = await previews_for(db, msgs)
-    return [
-        message_out(m, u, f, aggs.get(m.id), comps.get(m.id), replies.get(m.id),
-                    None, previews.get(m.id))
-        for m, u, f in rows
-    ]
+    replies = await reply_previews_for(db, live)
+    previews = await previews_for(db, live)
+    out: list[MessageOut] = []
+    for m, u, f in rows:
+        if m.deleted_at is not None:  # only ever the root
+            out.append(message_out(m, u).model_copy(update={
+                "content": "(message deleted)", "file": None, "reply_to": None,
+                "reactions": [], "task_cleared": {}, "link_previews": []}))
+        else:
+            out.append(message_out(m, u, f, aggs.get(m.id), comps.get(m.id),
+                                   replies.get(m.id), None, previews.get(m.id)))
+    return out
 
 
 async def _broadcast_thread_meta(
@@ -911,6 +918,13 @@ async def send_message(
             raise HTTPException(400, "Invalid thread target")
         # Flatten to one level: a reply to a reply joins the same root.
         thread_root_id = thread_root.thread_root_id or thread_root.id
+        if thread_root_id != thread_root.id:
+            # Replying via a surviving reply must still land under a LIVE root:
+            # a deleted thread accepts no new posts (it stays readable as a
+            # tombstone, see list_thread).
+            actual_root = await db.get(Message, thread_root_id)
+            if actual_root is None or actual_root.deleted_at is not None:
+                raise HTTPException(400, "That thread is no longer available")
     message = Message(
         channel_id=channel_id,
         sender_id=user.id,

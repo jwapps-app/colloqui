@@ -24,5 +24,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint("fk_messages_reply_to", "messages", type_="foreignkey")
-    op.drop_column("messages", "reply_to_id")
+    # Dropping the column drops its FK with it, whatever the FK is named (a
+    # fresh install's create_all auto-names it, not "fk_messages_reply_to").
+    op.execute("ALTER TABLE messages DROP COLUMN IF EXISTS reply_to_id")

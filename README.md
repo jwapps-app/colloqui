@@ -14,9 +14,12 @@ The client is an installable **PWA**: add it to your home screen on iOS or
 desktop for an app-like window, offline message viewing, and push notifications
 (see Web Push below). There is no separate native app to install or maintain.
 
-Everything runs on hardware you control. The only outbound network call the
-server ever makes is fetching a pasted URL's title for a link preview (and that
-is SSRF-hardened, refusing private/loopback/cloud-metadata addresses).
+Everything runs on hardware you control. The server makes outbound requests
+only for things you turn on or paste in: link previews for pasted URLs, Web
+Push and APNs (via your own relay) notifications to your devices, and outgoing
+webhooks to integrations you register. Every one of those destinations is
+SSRF-hardened (validated and pinned to public addresses; loopback, link-local
+and cloud-metadata ranges are refused).
 
 ## Quick start (self-host)
 

@@ -25,6 +25,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint("fk_messages_pinned_by", "messages", type_="foreignkey")
-    op.drop_column("messages", "pinned_by")
-    op.drop_column("messages", "pinned_at")
+    # Column drops take their FKs with them, whatever name the FK has.
+    op.execute("ALTER TABLE messages DROP COLUMN IF EXISTS pinned_by")
+    op.execute("ALTER TABLE messages DROP COLUMN IF EXISTS pinned_at")

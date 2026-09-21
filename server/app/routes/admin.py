@@ -21,6 +21,7 @@ from ..models import (
     Invite,
     PasswordCredential,
     Space,
+    SpaceMember,
     User,
     WebAuthnCredential,
     utcnow,
@@ -77,8 +78,26 @@ async def delete_user(
     file_ids = (
         await db.scalars(select(File.id).where(File.uploader_id == user_id))
     ).all()
+    # Where they held the only owner/manager role, someone must inherit it
+    # once their memberships cascade away.
+    owned_channels = (await db.scalars(
+        select(ChannelMember.channel_id).where(
+            ChannelMember.user_id == user_id, ChannelMember.role == "owner")
+    )).all()
+    managed_spaces = (await db.scalars(
+        select(SpaceMember.space_id).where(
+            SpaceMember.user_id == user_id, SpaceMember.role == "manager")
+    )).all()
 
     await db.delete(target)  # cascades sessions, credentials, memberships, messages…
+    await db.flush()
+    from .channels import _ensure_channel_owner
+    from .spaces import _ensure_space_manager
+
+    for cid in owned_channels:
+        await _ensure_channel_owner(db, cid)
+    for sid in managed_spaces:
+        await _ensure_space_manager(db, sid)
     await db.commit()
 
     for file_id in file_ids:

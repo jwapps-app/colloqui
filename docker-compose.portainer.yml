@@ -18,8 +18,9 @@ services:
       - RP_ID=${RP_ID:-jjrrr.co}
       - ORIGIN=${ORIGIN:-https://colloqui.jjrrr.co}
       - DEV_MODE=${DEV_MODE:-false}
-      # Web Push (PWA notifications, incl. iOS). Empty = off (safe no-op). Set
-      # these in the stack's env to enable; see the README Web Push section.
+      # Web Push (PWA notifications, incl. iOS). Leave empty to use the keypair
+      # the server auto-generates and persists on first start (web push is ON by
+      # default); set both to pin your own keys across instances.
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_SUBJECT=${VAPID_SUBJECT:-}

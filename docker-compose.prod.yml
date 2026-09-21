@@ -22,8 +22,9 @@ services:
       - PUSH_RELAY_URL=${PUSH_RELAY_URL:-}
       - PUSH_RELAY_API_KEY=${PUSH_RELAY_API_KEY:-}
       - APNS_TOPIC=${APNS_TOPIC:-com.jworthington.colloqui}
-      # Web Push (PWA notifications, incl. iOS). Empty = off (safe no-op). Fill
-      # these in .env to enable; see the Web Push section in the README.
+      # Web Push (PWA notifications, incl. iOS). Leave empty to use the keypair
+      # the server auto-generates and persists on first start (web push is ON by
+      # default); set both to pin your own keys across instances.
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_SUBJECT=${VAPID_SUBJECT:-}

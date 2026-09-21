@@ -20,18 +20,28 @@ branch_labels = None
 depends_on = None
 
 
+def _cols(table: str) -> set[str]:
+    return {c["name"] for c in sa.inspect(op.get_bind()).get_columns(table)}
+
+
 def upgrade() -> None:
-    op.add_column(
-        "totp_credentials",
-        sa.Column("last_used_step", sa.BigInteger(), nullable=True),
-    )
-    op.add_column(
-        "reminders",
-        sa.Column("anchor_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.execute("UPDATE reminders SET anchor_at = due_at WHERE recurrence IS NOT NULL")
+    # Idempotent: a fresh install's 0001 creates the full current schema, so
+    # these columns may already exist (every add_column migration here must
+    # tolerate that or fresh deployments fail).
+    if "last_used_step" not in _cols("totp_credentials"):
+        op.add_column(
+            "totp_credentials",
+            sa.Column("last_used_step", sa.BigInteger(), nullable=True),
+        )
+    if "anchor_at" not in _cols("reminders"):
+        op.add_column(
+            "reminders",
+            sa.Column("anchor_at", sa.DateTime(timezone=True), nullable=True),
+        )
+    op.execute("UPDATE reminders SET anchor_at = due_at "
+               "WHERE recurrence IS NOT NULL AND anchor_at IS NULL")
 
 
 def downgrade() -> None:
-    op.drop_column("reminders", "anchor_at")
-    op.drop_column("totp_credentials", "last_used_step")
+    op.execute("ALTER TABLE reminders DROP COLUMN IF EXISTS anchor_at")
+    op.execute("ALTER TABLE totp_credentials DROP COLUMN IF EXISTS last_used_step")

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -527,7 +528,12 @@ async def create_channel(
         created_by=user.id, position=(max_pos or 0) + 1,
     )
     db.add(channel)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Two requests raced past the check above; the unique index decides.
+        await db.rollback()
+        raise HTTPException(409, "A channel with that name already exists in this space")
     db.add(ChannelMember(channel_id=channel.id, user_id=user.id, role="owner"))
     # Public channels are visible to the whole space: enroll its members.
     if not body.is_private:
@@ -573,7 +579,11 @@ async def update_channel(
             channel.name = name
     if body.topic is not None:
         channel.topic = body.topic.strip() or None
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A channel with that name already exists")
     await manager.send_to_users(
         await member_ids(db, channel_id),
         {"type": "channel.updated", "channel_id": str(channel_id)},
@@ -602,6 +612,17 @@ async def move_channel(
         raise HTTPException(403, "You must be a member of the destination space")
     if channel.space_id == space.id:
         return await channel_out(db, channel, user)
+    # The destination may already have a channel by this name (create/rename
+    # checked this; move never did, and the DB now enforces it).
+    clash = await db.scalar(
+        select(Channel.id).where(
+            Channel.space_id == space.id,
+            Channel.name == channel.name,
+            Channel.is_dm == False,  # noqa: E712
+        )
+    )
+    if clash is not None:
+        raise HTTPException(409, "A channel with that name already exists in that space")
 
     old_members = set(await member_ids(db, channel_id))
     channel.space_id = space.id
@@ -754,7 +775,34 @@ async def leave_channel(
     if channel.is_dm:
         raise HTTPException(400, "Cannot leave a DM")
     member = await db.get(ChannelMember, (channel_id, user.id))
+    was_owner = member.role == "owner"
     await db.delete(member)
+    await db.flush()
+    if was_owner:
+        await _ensure_channel_owner(db, channel_id)
+
+
+async def _ensure_channel_owner(db: AsyncSession, channel_id: uuid.UUID) -> None:
+    """If a channel is left with members but no owner, the longest-standing
+    remaining member inherits the role, so routine management (members, rename,
+    webhooks) never needs an admin. An empty channel simply stays ownerless."""
+    has_owner = await db.scalar(
+        select(ChannelMember.user_id).where(
+            ChannelMember.channel_id == channel_id, ChannelMember.role == "owner"
+        ).limit(1)
+    )
+    if has_owner is not None:
+        return
+    heir = await db.scalar(
+        select(ChannelMember)
+        .where(ChannelMember.channel_id == channel_id)
+        .order_by(ChannelMember.joined_at, ChannelMember.user_id)
+        .limit(1)
+    )
+    if heir is not None:
+        heir.role = "owner"
+        await db.flush()
+        await manager.send_to_users([heir.user_id], {"type": "channels.changed"})
 
 
 @router.delete("/channels/{channel_id}/members/{user_id}", status_code=204)
