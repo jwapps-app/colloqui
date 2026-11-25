@@ -5,6 +5,7 @@ import { resolveDialog } from './dialogs.js';
 import { $ } from './dom.js';
 import { imageUrls } from './files.js';
 import { b64u } from './format.js';
+import { clearInfoPane } from './infopane.js';
 import { resetPushSetup } from './notifications.js';
 import { disconnectWs, typers } from './realtime.js';
 import { closeWhen } from './reminders.js';
@@ -157,10 +158,13 @@ export function signOutLocal() {
   // the last one's open channel name or its action buttons.
   clearChannelView();
   // Drop rendered conversation + list DOM and every cached file/avatar blob.
+  // Only ever empty a list that a script fills: a container that holds page
+  // structure cannot be rebuilt (tests/test_static.py enforces this).
   for (const id of ['messages', 'spaces-container', 'dm-list', 'pins-list',
-                    'threads-list', 'info-content']) {
+                    'threads-list']) {
     const el = $(id); if (el) el.innerHTML = '';
   }
+  clearInfoPane();
   for (const entry of imageUrls.values()) { try { URL.revokeObjectURL(entry.url); } catch {} }
   imageUrls.clear();
   for (const url of avatarCache.values()) { try { URL.revokeObjectURL(url); } catch {} }

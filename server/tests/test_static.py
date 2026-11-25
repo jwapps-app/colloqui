@@ -80,3 +80,68 @@ def test_no_native_dialogs():
         if found:
             stray[name] = sorted(set(found))
     assert not stray, f"native dialog call(s) snuck back in: {stray}"
+
+
+def _elements_with_children() -> set[str]:
+    """ids in index.html whose element contains other elements: page structure
+    that exists only in the HTML and that no script can rebuild."""
+    from html.parser import HTMLParser
+
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+            "meta", "source", "track", "wbr"}
+
+    class Outline(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.open: list[str | None] = []   # id (or None) of each open element
+            self.structural: set[str] = set()
+
+        def handle_starttag(self, tag, attrs):
+            for ancestor in self.open:
+                if ancestor:
+                    self.structural.add(ancestor)
+            if tag not in VOID:
+                self.open.append(dict(attrs).get("id"))
+
+        def handle_endtag(self, tag):
+            if tag not in VOID and self.open:
+                self.open.pop()
+
+    outline = Outline()
+    outline.feed(_read("index.html"))
+    return outline.structural
+
+
+def _emptied_ids(js: str) -> set[str]:
+    """Element ids a script empties or refills wholesale."""
+    ids = set(re.findall(r"\$\('([\w-]+)'\)\.(?:innerHTML\s*=|replaceChildren\()", js))
+    ids |= set(re.findall(r"fillList\(\$\('([\w-]+)'\)", js))
+    # const list = $('some-id'); ... list.innerHTML = '' / fillList(list, ...)
+    for var, element_id in re.findall(r"const (\w+) = \$\('([\w-]+)'\);", js):
+        if re.search(rf"\b{var}\.innerHTML\s*=|\b{var}\.replaceChildren\(|fillList\({var}\b", js):
+            ids.add(element_id)
+    # for (const id of ['a', 'b']) { ... $(id) ... innerHTML = '' }
+    for id_list, body in re.findall(
+        r"for \(const id of \[([^\]]*)\]\)\s*\{([^}]*)\}", js, flags=re.S
+    ):
+        if "innerHTML" in body or "replaceChildren" in body:
+            ids |= set(re.findall(r"'([\w-]+)'", id_list))
+    return ids
+
+
+def test_scripts_only_empty_leaf_containers():
+    # Signing out used to empty the channel pane's whole container, headings
+    # and lists included. Nothing can rebuild those, so after signing back in
+    # the pane stayed blank until a reload. A script may empty a list it fills;
+    # it must never empty an element that holds page structure.
+    structural = _elements_with_children()
+    assert {"info-content", "info-pane", "app"} <= structural   # the guard can see structure
+    offenders = {
+        name: sorted(_emptied_ids(js) & structural)
+        for name, js in _client_sources().items()
+        if _emptied_ids(js) & structural
+    }
+    assert not offenders, (
+        "these elements hold fixed page structure and must not be emptied: "
+        f"{offenders}"
+    )

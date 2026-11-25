@@ -14,6 +14,18 @@ export function closeInfoPane() {
   $('info-pane').classList.add('hidden');
 }
 
+// Forget what the pane was showing (sign-out). Empties the lists this module
+// fills and nothing else: the pane's sections and headings exist only in
+// index.html, so emptying their container would leave the pane blank until a
+// reload.
+export function clearInfoPane() {
+  for (const id of ['notify-pref', 'info-threads', 'info-pins', 'info-tasks',
+                    'info-reminders', 'info-webhooks']) {
+    $(id).innerHTML = '';
+  }
+  $('info-space-current').textContent = '';
+}
+
 // After closing a thread/preview on desktop, fall back to the Channel pane
 // (the default right-hand column). No-op on mobile or with no channel open.
 export function maybeReopenInfoPane() {

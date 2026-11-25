@@ -56,7 +56,7 @@ Read this before adding a feature. The reasoning behind each rule is in
 12. **`app.js` holds wiring only.** New behaviour goes in a module under `js/`.
 13. **Never write a version number.** Reference assets as `/assets/__BUILD__/...` in `index.html` and import modules with relative paths. The server stamps the build id.
 14. **Shared state lives in `state`.** State one module owns stays private to it. Another module that needs to change it calls a function that module exports.
-15. **Build DOM with `el()`, `emptyRow()`, `titledRow()` and `fillList()`.** A row that appears in two lists is defined once in `rows.js`.
+15. **Build DOM with `el()`, `emptyRow()`, `titledRow()` and `fillList()`.** A row that appears in two lists is defined once in `rows.js`. A script may empty a list it fills. It must never empty an element that holds page structure from `index.html`, because nothing can rebuild it (`tests/test_static.py` checks this).
 16. **A click handler whose only error handling is "show the message" uses `guarded()`.** A silent `catch {}` is for work that is truly best effort, and says so.
 17. **The task grammar and the server vocabulary are never spelled out in a feature module.** Use `tasks.js` and `meta.js`.
 18. **Keep `markdown.js`, `tasks.js`, `format.js` and `dom.js` free of network and app imports,** so their tests keep running under Node.

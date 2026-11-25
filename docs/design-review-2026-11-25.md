@@ -25,6 +25,7 @@ All eight priorities were fixed on 2026-11-25, along with most of the optional i
 - **Responses left before the commit too.** Creating a user and signing in as them at once failed during verification, because the session committed after the response was sent. The `DB` dependency now commits first. `tests/test_design.py` pins both.
 - **A stale header after sign out.** The previous account's channel name and action buttons stayed on screen. Sign out now clears the channel view.
 - **An inline style blocked by the content security policy** on the thread "Loading" placeholder. It is set through the DOM now.
+- **A blank channel pane after signing out and back in** (found in v1.0.68, fixed in v1.0.69). Sign out emptied the pane's whole container, headings included. The line dated from the September audit fixes. Sign out now empties only the lists, and a static test refuses any script that empties an element holding page structure.
 
 ### Behaviour that changed on purpose
 
