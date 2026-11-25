@@ -1,0 +1,17 @@
+{
+  "about": "One list of task-line cases, read by BOTH the server test (tests/test_design.py) and the client test (tests/js/tasks.test.mjs). The server counts open tasks and the client draws them, so the two grammars must agree line for line. Add a case here, never in just one of the two tests.",
+  "cases": [
+    { "line": "[ ] buy milk",        "task": true,  "done": false, "open": true,  "text": "buy milk" },
+    { "line": "[x] done",            "task": true,  "done": true,  "open": false, "text": "done" },
+    { "line": "[X] also done",       "task": true,  "done": true,  "open": false, "text": "also done" },
+    { "line": "[ ] ",                "task": true,  "done": false, "open": false, "text": "" },
+    { "line": "[ ]  two spaces",     "task": true,  "done": false, "open": true,  "text": " two spaces" },
+    { "line": " [ ] indented",       "task": false },
+    { "line": "text [ ] inline",     "task": false },
+    { "line": "[ ]no space",         "task": false },
+    { "line": "[]  empty box",       "task": false },
+    { "line": "[y] wrong letter",    "task": false },
+    { "line": "- [ ] bullet first",  "task": false },
+    { "line": "",                    "task": false }
+  ]
+}

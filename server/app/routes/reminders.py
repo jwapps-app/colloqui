@@ -5,11 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_db
+from ..access import require_member
+from ..db import DB
 from ..deps import get_current_user
 from ..models import Message, Reminder, User, utcnow
 from ..schemas import ReminderIn, ReminderOut, ReminderUpdateIn
-from .channels import require_member
 
 router = APIRouter(prefix="/api/v1/reminders", tags=["reminders"])
 
@@ -30,7 +30,7 @@ def _validate_due_at(due_at) -> None:
 @router.post("", response_model=ReminderOut, status_code=201)
 async def create_reminder(
     body: ReminderIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> Reminder:
     # Idempotent replay: a client resending an offline-created reminder (same
@@ -81,7 +81,7 @@ async def create_reminder(
 async def update_reminder(
     reminder_id: uuid.UUID,
     body: ReminderUpdateIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> Reminder:
     reminder = await db.get(Reminder, reminder_id)
@@ -103,7 +103,7 @@ async def update_reminder(
 
 @router.get("", response_model=list[ReminderOut])
 async def list_pending_reminders(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> list[Reminder]:
     reminders = await db.scalars(
         select(Reminder)
@@ -117,7 +117,7 @@ async def list_pending_reminders(
 @router.delete("/{reminder_id}", status_code=204)
 async def delete_reminder(
     reminder_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     reminder = await db.get(Reminder, reminder_id)

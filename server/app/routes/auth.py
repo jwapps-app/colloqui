@@ -29,9 +29,11 @@ from webauthn.helpers.structs import (
     UserVerificationRequirement,
 )
 
+from .. import events
 from ..config import settings
-from ..db import get_db
+from ..db import DB, commit
 from ..deps import get_current_user, rate_limit_auth
+from ..membership import join_default_space
 from ..models import (
     ApiKey,
     DeviceToken,
@@ -44,7 +46,6 @@ from ..models import (
     utcnow,
 )
 from ..models import Session as AuthSession
-from ..ws import manager
 from ..schemas import (
     AddPasskeyIn,
     LoginOptionsIn,
@@ -144,7 +145,7 @@ async def _reset_for_recovery(
     await db.execute(delete(TotpCredential).where(TotpCredential.user_id == user_id))
     await db.execute(delete(PushSubscription).where(PushSubscription.user_id == user_id))
     await db.execute(delete(DeviceToken).where(DeviceToken.user_id == user_id))
-    await manager.disconnect_user(user_id)
+    events.disconnect_user(db, user_id)
 
 
 async def _consume_invite(db: AsyncSession, invite: Invite, user_id: uuid.UUID) -> None:
@@ -231,9 +232,61 @@ async def _resolve_registration(
     return is_first_user, invite, recover_user
 
 
+async def _account_for_registration(
+    db: AsyncSession,
+    *,
+    username: str,
+    display_name: str,
+    is_admin: bool,
+    recover_user_id: uuid.UUID | None,
+    new_user_id: uuid.UUID | None = None,
+    keep_passkey: bytes | None = None,
+) -> User:
+    """The account a verified registration signs in to, whichever credential
+    type it used. Either an existing account being recovered (everything the
+    old device held is invalidated: sessions, other passkeys, API keys, TOTP,
+    push targets) or a brand-new one, already in the default space."""
+    if recover_user_id is not None:
+        user = await db.get(User, recover_user_id)
+        if user is None or user.disabled:
+            raise HTTPException(403, "Account unavailable")
+        await db.execute(
+            update(AuthSession).where(AuthSession.user_id == user.id).values(revoked=True)
+        )
+        await _reset_for_recovery(db, user.id, keep_passkey=keep_passkey)
+        return user
+    if await db.scalar(select(User.id).where(User.username == username)):
+        raise HTTPException(409, "Username is taken")
+    user = User(username=username, display_name=display_name, is_admin=is_admin)
+    if new_user_id is not None:
+        user.id = new_user_id  # the WebAuthn user handle the passkey was made for
+    db.add(user)
+    # Flush the user row before anything that references it: without
+    # relationship() mappings SQLAlchemy doesn't order writes across tables,
+    # so the credential/invite/session rows would race the user INSERT.
+    await db.flush()
+    await join_default_space(db, user.id, user.is_admin)
+    return user
+
+
+async def _finish_registration(
+    db: AsyncSession, user: User, invite: Invite | None, request: Request
+) -> TokenOut:
+    """Spend the invite, issue the session and commit, in that order."""
+    if invite:
+        await _consume_invite(db, invite, user.id)
+    await db.flush()
+    token = await _issue_session(db, user, request)
+    # Commit before building the response: a failure here must not leave the
+    # client holding a token (or a saved passkey) for an account that was
+    # never stored.
+    await commit(db)
+    return TokenOut(token=token, user=MeOut.model_validate(user))
+
+
 @router.post("/register/options")
 async def register_options(
-    body: RegisterOptionsIn, db: AsyncSession = Depends(get_db)
+    body: RegisterOptionsIn, db: AsyncSession = DB
 ) -> dict:
     username = body.username.lower()
     is_first_user, invite, recover_user = await _resolve_registration(
@@ -266,7 +319,7 @@ async def register_options(
 
 @router.post("/register/verify", response_model=TokenOut)
 async def register_verify(
-    body: VerifyIn, request: Request, db: AsyncSession = Depends(get_db)
+    body: VerifyIn, request: Request, db: AsyncSession = DB
 ) -> TokenOut:
     pending = pending_registrations.pop(body.token)
     if pending is None:
@@ -286,34 +339,15 @@ async def register_verify(
     elif pending["is_admin"]:
         await _claim_first_user(db)
 
-    if pending["recover"]:
-        user = await db.get(User, pending["user_id"])
-        if user is None or user.disabled:
-            raise HTTPException(403, "Account unavailable")
-        # The old device may be lost or stolen — invalidate everything it held:
-        # sessions, other passkeys, API keys, TOTP, push targets.
-        await db.execute(
-            update(AuthSession)
-            .where(AuthSession.user_id == user.id)
-            .values(revoked=True)
-        )
-        await _reset_for_recovery(db, user.id, keep_passkey=verification.credential_id)
-    else:
-        if await db.scalar(select(User.id).where(User.username == pending["username"])):
-            raise HTTPException(409, "Username is taken")
-        user = User(
-            id=pending["user_id"],
-            username=pending["username"],
-            display_name=pending["display_name"],
-            is_admin=pending["is_admin"],
-        )
-        db.add(user)
-
-    # Flush the user row before anything that references it: without
-    # relationship() mappings SQLAlchemy doesn't order writes across tables,
-    # so the credential/invite/session rows would race the user INSERT.
-    await db.flush()
-
+    user = await _account_for_registration(
+        db,
+        username=pending["username"],
+        display_name=pending["display_name"],
+        is_admin=pending["is_admin"],
+        recover_user_id=pending["user_id"] if pending["recover"] else None,
+        new_user_id=pending["user_id"],
+        keep_passkey=verification.credential_id,
+    )
     db.add(
         WebAuthnCredential(
             id=verification.credential_id,
@@ -323,27 +357,11 @@ async def register_verify(
             last_used_at=utcnow(),
         )
     )
-    if invite:
-        await _consume_invite(db, invite, user.id)
-
-    if not pending["recover"]:
-        # Every new user joins the default space (and its public channels).
-        from .spaces import add_to_space, ensure_default_space
-
-        space = await ensure_default_space(db, user.id)
-        await add_to_space(
-            db, space.id, user.id, "manager" if user.is_admin else "member"
-        )
-
-    token = await _issue_session(db, user, request)
-    # Commit before responding: a deferred commit failure would roll back the
-    # account *after* the client already saved its passkey and got a 200.
-    await db.commit()
-    return TokenOut(token=token, user=MeOut.model_validate(user))
+    return await _finish_registration(db, user, invite, request)
 
 
 @router.post("/login/options")
-async def login_options(body: LoginOptionsIn, db: AsyncSession = Depends(get_db)) -> dict:
+async def login_options(body: LoginOptionsIn, db: AsyncSession = DB) -> dict:
     allow_credentials: list[PublicKeyCredentialDescriptor] = []
     if body.username:
         user = await db.scalar(select(User).where(User.username == body.username.lower()))
@@ -365,7 +383,7 @@ async def login_options(body: LoginOptionsIn, db: AsyncSession = Depends(get_db)
 
 @router.post("/login/verify", response_model=TokenOut)
 async def login_verify(
-    body: VerifyIn, request: Request, db: AsyncSession = Depends(get_db)
+    body: VerifyIn, request: Request, db: AsyncSession = DB
 ) -> TokenOut:
     pending = pending_logins.pop(body.token)
     if pending is None:
@@ -399,7 +417,7 @@ async def login_verify(
     db_cred.sign_count = verification.new_sign_count
     db_cred.last_used_at = utcnow()
     token = await _issue_session(db, user, request)
-    await db.commit()
+    await commit(db)
     return TokenOut(token=token, user=MeOut.model_validate(user))
 
 
@@ -408,7 +426,7 @@ async def login_verify(
 
 @router.post("/register/password", response_model=TokenOut)
 async def register_password(
-    body: RegisterPasswordIn, request: Request, db: AsyncSession = Depends(get_db)
+    body: RegisterPasswordIn, request: Request, db: AsyncSession = DB
 ) -> TokenOut:
     username = body.username.lower()
     is_first_user, invite, recover_user = await _resolve_registration(
@@ -416,44 +434,25 @@ async def register_password(
     )
     if is_first_user:
         await _claim_first_user(db)  # serialised, not just re-checked
-    if recover_user is not None:
-        user = recover_user
-        # Claiming a recovery account: invalidate everything the old device
-        # held (sessions, passkeys, API keys, TOTP, push targets).
-        await db.execute(
-            update(AuthSession).where(AuthSession.user_id == user.id).values(revoked=True)
-        )
-        await _reset_for_recovery(db, user.id)
-    else:
-        user = User(
-            username=username, display_name=body.display_name, is_admin=is_first_user
-        )
-        db.add(user)
-        await db.flush()
-        from .spaces import add_to_space, ensure_default_space
-
-        space = await ensure_default_space(db, user.id)
-        await add_to_space(
-            db, space.id, user.id, "manager" if user.is_admin else "member"
-        )
-
+    user = await _account_for_registration(
+        db,
+        username=username,
+        display_name=body.display_name,
+        is_admin=is_first_user,
+        recover_user_id=recover_user.id if recover_user else None,
+    )
     existing = await db.get(PasswordCredential, user.id)
     new_hash = await _hash_password_async(body.password)
     if existing is None:
         db.add(PasswordCredential(user_id=user.id, password_hash=new_hash))
     else:
         existing.password_hash = new_hash
-    if invite:
-        await _consume_invite(db, invite, user.id)
-    await db.flush()
-    token = await _issue_session(db, user, request)
-    await db.commit()
-    return TokenOut(token=token, user=MeOut.model_validate(user))
+    return await _finish_registration(db, user, invite, request)
 
 
 @router.post("/login/password", response_model=TokenOut)
 async def login_password(
-    body: LoginPasswordIn, request: Request, db: AsyncSession = Depends(get_db)
+    body: LoginPasswordIn, request: Request, db: AsyncSession = DB
 ) -> TokenOut:
     user = await db.scalar(select(User).where(User.username == body.username.lower()))
     # Per-account lockout: refuse before doing any work once the account has
@@ -490,13 +489,13 @@ async def login_password(
             raise HTTPException(401, "Incorrect authentication code")
     _acct_fail_limiter.reset(_acct_key(user.id))  # a clean sign-in clears strikes
     token = await _issue_session(db, user, request)
-    await db.commit()
+    await commit(db)
     return TokenOut(token=token, user=MeOut.model_validate(user))
 
 
 @router.get("/password")
 async def password_status(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> dict:
     cred = await db.get(PasswordCredential, user.id)
     return {"has_password": cred is not None}
@@ -515,14 +514,14 @@ async def _revoke_other_sessions(request: Request, db: AsyncSession, user_id) ->
         .values(revoked=True)
     )
     # A revoked session's open WebSocket would otherwise keep streaming.
-    await manager.disconnect_user_except(user_id, current_hash)
+    events.disconnect_user_except(db, user_id, current_hash)
 
 
 @router.post("/password")
 async def set_password(
     request: Request,
     body: SetPasswordIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> dict:
     cred = await db.get(PasswordCredential, user.id)
@@ -546,7 +545,7 @@ async def set_password(
 @router.delete("/password", status_code=204)
 async def remove_password(
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     cred = await db.get(PasswordCredential, user.id)
@@ -605,7 +604,7 @@ def _new_recovery_codes(n: int = 10) -> tuple[list[str], list[str]]:
 
 @router.get("/totp", response_model=TotpStatusOut)
 async def totp_status(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> TotpStatusOut:
     totp = await db.get(TotpCredential, user.id)
     return TotpStatusOut(enabled=bool(totp and totp.confirmed_at))
@@ -613,7 +612,7 @@ async def totp_status(
 
 @router.post("/totp/setup", response_model=TotpSetupOut)
 async def totp_setup(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> TotpSetupOut:
     existing = await db.get(TotpCredential, user.id)
     if existing is not None and existing.confirmed_at is not None:
@@ -625,11 +624,12 @@ async def totp_setup(
         existing.recovery_codes = []
     else:
         db.add(TotpCredential(user_id=user.id, secret=secret, recovery_codes=[]))
-    # Explicit commit: get_db commits only after the response is sent, and the
-    # user is about to scan this secret into their authenticator — it must be
+    # Explicit commit (the request would also commit before responding, see
+    # db.DB; this keeps the guarantee local): the user is about to scan this
+    # secret into their authenticator — it must be
     # durably stored before we hand it out (same bug class as the TOTP login
     # bounce).
-    await db.commit()
+    await commit(db)
     uri = pyotp.TOTP(secret).provisioning_uri(name=user.username, issuer_name="Colloqui")
     buf = io.BytesIO()
     segno.make(uri).save(buf, kind="svg", scale=4, border=2)
@@ -639,7 +639,7 @@ async def totp_setup(
 @router.post("/totp/confirm", response_model=RecoveryCodesOut)
 async def totp_confirm(
     body: TotpCodeIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> RecoveryCodesOut:
     totp = await db.get(TotpCredential, user.id)
@@ -655,14 +655,14 @@ async def totp_confirm(
     totp.recovery_codes = hashes
     # Explicit commit: the user saves these recovery codes the moment they see
     # them — a failed deferred commit would leave codes that never persisted.
-    await db.commit()
+    await commit(db)
     return RecoveryCodesOut(recovery_codes=display)
 
 
 @router.post("/totp/disable", status_code=204)
 async def totp_disable(
     body: TotpCodeIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     totp = await db.get(TotpCredential, user.id)
@@ -671,13 +671,13 @@ async def totp_disable(
     if not verify_second_factor(totp, body.code):
         raise HTTPException(400, "Incorrect authentication code")
     await db.delete(totp)
-    await db.commit()
+    await commit(db)
 
 
 @router.post("/totp/recovery-codes", response_model=RecoveryCodesOut)
 async def totp_regen_recovery(
     body: TotpCodeIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> RecoveryCodesOut:
     totp = await db.get(TotpCredential, user.id)
@@ -687,7 +687,7 @@ async def totp_regen_recovery(
         raise HTTPException(400, "Incorrect authentication code")
     display, hashes = _new_recovery_codes()
     totp.recovery_codes = hashes
-    await db.commit()
+    await commit(db)
     return RecoveryCodesOut(recovery_codes=display)
 
 
@@ -699,7 +699,7 @@ async def me(user: User = Depends(get_current_user)) -> User:
 @router.post("/logout")
 async def logout(
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> dict:
     token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
@@ -710,7 +710,7 @@ async def logout(
         session.revoked = True
         # Close the WebSocket this session opened; it authenticated once at
         # connect and would otherwise keep receiving messages after logout.
-        await manager.disconnect_token(session.token_hash)
+        events.disconnect_token(db, session.token_hash)
     return {"ok": True}
 
 
@@ -728,7 +728,7 @@ def _passkey_out(cred: WebAuthnCredential) -> PasskeyOut:
 
 @router.get("/passkeys", response_model=list[PasskeyOut])
 async def list_passkeys(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> list[PasskeyOut]:
     creds = await db.scalars(
         select(WebAuthnCredential)
@@ -741,7 +741,7 @@ async def list_passkeys(
 @router.post("/passkeys/options")
 async def add_passkey_options(
     body: AddPasskeyIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> dict:
     creds = (
@@ -768,7 +768,7 @@ async def add_passkey_options(
 async def add_passkey_verify(
     request: Request,
     body: VerifyIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> PasskeyOut:
     pending = pending_passkey_adds.pop(body.token)
@@ -787,7 +787,7 @@ async def add_passkey_verify(
     )
     db.add(cred)
     await _revoke_other_sessions(request, db, user.id)
-    await db.commit()
+    await commit(db)
     return _passkey_out(cred)
 
 
@@ -795,7 +795,7 @@ async def add_passkey_verify(
 async def delete_passkey(
     request: Request,
     credential_id: str,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     try:
@@ -822,7 +822,7 @@ async def delete_passkey(
 @router.get("/sessions", response_model=list[SessionOut])
 async def list_sessions(
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> list[SessionOut]:
     current_hash = hash_token(
@@ -852,11 +852,11 @@ async def list_sessions(
 @router.delete("/sessions/{session_id}", status_code=204)
 async def revoke_session(
     session_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     session = await db.get(AuthSession, session_id)
     if session is None or session.user_id != user.id:
         raise HTTPException(404, "Session not found")
     session.revoked = True
-    await manager.disconnect_token(session.token_hash)
+    events.disconnect_token(db, session.token_hash)

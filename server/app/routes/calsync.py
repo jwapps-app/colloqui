@@ -10,10 +10,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..db import get_db
+from ..db import DB
 from ..deps import get_current_user
 from ..models import Channel, Reminder, User, utcnow
 from ..security import new_token
+from ..vocab import Recurrence
 
 router = APIRouter(tags=["calendar"])
 
@@ -24,7 +25,7 @@ def _feed_url(token: str) -> str:
 
 @router.get("/api/v1/calendar/url")
 async def calendar_url(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> dict:
     if not user.calendar_token:
         user.calendar_token = new_token()
@@ -33,7 +34,7 @@ async def calendar_url(
 
 @router.post("/api/v1/calendar/regenerate")
 async def calendar_regenerate(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> dict:
     user.calendar_token = new_token()
     return {"token": user.calendar_token, "url": _feed_url(user.calendar_token)}
@@ -69,7 +70,7 @@ def _fold(line: str) -> str:
 
 
 @router.get("/calendar/{token}.ics")
-async def calendar_feed(token: str, db: AsyncSession = Depends(get_db)) -> Response:
+async def calendar_feed(token: str, db: AsyncSession = DB) -> Response:
     user = await db.scalar(select(User).where(User.calendar_token == token))
     if user is None or user.disabled:
         raise HTTPException(404, "Not found")
@@ -101,7 +102,8 @@ async def calendar_feed(token: str, db: AsyncSession = Depends(get_db)) -> Respo
             )
         ).all()
     } if channel_ids else {}
-    freq = {"daily": "DAILY", "weekly": "WEEKLY", "monthly": "MONTHLY", "yearly": "YEARLY"}
+    # iCal's FREQ values are our recurrence names, upper-cased.
+    freq = {r.value: r.value.upper() for r in Recurrence}
     for r in reminders:
         name = name_by_id.get(r.channel_id) if r.channel_id else None
         where = f"In #{name}" if name else "Colloqui reminder"

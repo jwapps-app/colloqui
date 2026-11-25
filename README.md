@@ -198,10 +198,20 @@ Run the test suite against a throwaway database:
 ```sh
 cd server && pip install -r requirements-dev.txt
 TEST_DATABASE_URL=postgresql+asyncpg://app:<pw>@localhost:5432/app python -m pytest -q
+ruff check
 ```
 
-GitHub Actions runs the tests on every push and publishes the multi-arch image
-to `ghcr.io` when a `v*` tag is pushed.
+That one `pytest` run also syntax-checks the web client and runs its unit tests
+under Node (no npm packages; skipped if Node is not installed).
+
+The web client has no build step. `server/app/static/app.js` wires the page to
+the ES modules in `static/js/`, and the server serves every asset under
+`/assets/<build>/`, where the build id is a hash of the files. Nothing carries
+a hand-maintained version number. How the code is organised, and the rules that
+keep changes small, are in [docs/design-principles.md](docs/design-principles.md).
+
+GitHub Actions lints and runs the tests on every push and publishes the
+multi-arch image to `ghcr.io` when a `v*` tag is pushed.
 
 ## Releasing
 

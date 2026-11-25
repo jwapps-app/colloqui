@@ -1,19 +1,17 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import messaging
+from ..access import is_channel_manager, require_member
 from ..config import settings
-from ..db import get_db
+from ..db import DB
 from ..deps import client_ip, get_current_user
-from ..models import Channel, ChannelMember, Message, User, Webhook, utcnow
+from ..models import Channel, User, Webhook, utcnow
 from ..schemas import WebhookCreatedOut, WebhookIn, WebhookOut, WebhookPostIn
 from ..security import RateLimiter, hash_token, new_token
-from .channels import require_member
-from ..webhooks_out import dispatch_event
-from .messages import _notify_for_message, broadcast, message_out, record_change
 
 router = APIRouter(prefix="/api/v1", tags=["webhooks"])
 # Ingest lives at a short, prefix-less URL (/hooks/{token}) for clean webhook URLs.
@@ -26,14 +24,16 @@ _hook_limiter = RateLimiter(limit=30, window_seconds=60)
 _hook_ip_limiter = RateLimiter(limit=60, window_seconds=60)
 
 
-async def require_channel_manager(
+async def require_webhook_manager(
     db: AsyncSession, channel_id: uuid.UUID, user: User
 ) -> Channel:
+    """A webhook posts into the channel and its listing shows what is wired to
+    it, so managing one needs channel MEMBERSHIP as well as the manager rule:
+    an admin who is not in a private channel can't attach a webhook to it."""
     channel = await require_member(db, channel_id, user)
     if channel.is_dm:
         raise HTTPException(400, "DMs can't have webhooks")
-    member = await db.get(ChannelMember, (channel_id, user.id))
-    if not (user.is_admin or (member and member.role == "owner")):
+    if not await is_channel_manager(db, channel_id, user):
         raise HTTPException(403, "Only the channel owner or an admin can manage webhooks")
     return channel
 
@@ -44,10 +44,10 @@ async def require_channel_manager(
 async def create_webhook(
     channel_id: uuid.UUID,
     body: WebhookIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> WebhookCreatedOut:
-    await require_channel_manager(db, channel_id, user)
+    await require_webhook_manager(db, channel_id, user)
     token = new_token()
     hook = Webhook(
         channel_id=channel_id,
@@ -69,10 +69,10 @@ async def create_webhook(
 @router.get("/channels/{channel_id}/webhooks", response_model=list[WebhookOut])
 async def list_webhooks(
     channel_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> list[WebhookOut]:
-    await require_channel_manager(db, channel_id, user)
+    await require_webhook_manager(db, channel_id, user)
     hooks = (
         await db.scalars(
             select(Webhook)
@@ -86,13 +86,13 @@ async def list_webhooks(
 @router.delete("/webhooks/{webhook_id}", status_code=204)
 async def delete_webhook(
     webhook_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     hook = await db.get(Webhook, webhook_id)
     if hook is None:
         raise HTTPException(404, "Webhook not found")
-    await require_channel_manager(db, hook.channel_id, user)
+    await require_webhook_manager(db, hook.channel_id, user)
     await db.delete(hook)
 
 
@@ -101,7 +101,7 @@ async def ingest(
     request: Request,
     token: str,
     body: WebhookPostIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
 ) -> dict:
     """Public ingest endpoint — auth is the secret token in the URL."""
     if not _hook_ip_limiter.allow(client_ip(request)):
@@ -117,27 +117,21 @@ async def ingest(
     if channel is None:
         raise HTTPException(404, "Channel no longer exists")
     # FK requires a real sender; the displayed identity is the webhook name.
-    sender_id = hook.created_by or channel.created_by
-    sender = await db.get(User, sender_id)
-    display_name = (body.name or hook.name).strip()[:64]
-    message = Message(
-        channel_id=channel.id,
-        sender_id=sender_id,
-        content=body.text.strip(),
-        webhook_name=display_name,
-    )
-    db.add(message)
+    sender = await db.get(User, hook.created_by or channel.created_by)
+    if sender is None:
+        raise HTTPException(404, "Channel no longer exists")
     hook.last_used_at = utcnow()
-    await db.flush()
-    await record_change(db, message)
-    out = message_out(message, sender)
-    await db.commit()  # publish only what is durably saved
-    await broadcast(
-        db, channel.id, {"type": "message.created", "message": jsonable_encoder(out)}
+    # Webhook-posted messages are real messages: same change-log, live event,
+    # integration event and notifications as any other. The one difference is
+    # deliberate: the server does not go and fetch link previews for URLs that
+    # an external system posted (outbound requests happen only for links a
+    # person pasted).
+    await messaging.post_message(
+        db,
+        channel,
+        sender,
+        body.text,
+        webhook_name=(body.name or hook.name).strip()[:64],
+        fetch_previews=False,
     )
-    # Webhook-posted messages are real messages: integrations subscribed to
-    # message.created should hear about them like any other.
-    dispatch_event("message.created", jsonable_encoder(out))
-    if sender is not None:
-        await _notify_for_message(db, channel, sender, message.content)
     return {"ok": True}

@@ -58,14 +58,16 @@ Two options, use either or both:
    ```
    Supply a client-generated `id` (UUID) on the message body for idempotent
    send: replaying the same id returns the existing message instead of creating
-   a duplicate. Safe to retry.
+   a duplicate. Safe to retry. If that message has since been deleted, the
+   replay returns it as a tombstone (`deleted_at` set, empty `content`).
 
 2. **Incoming webhook** (simplest, per channel, no key needed):
    ```
    POST /hooks/{webhook_token}   {"text": "Deal closed: Acme", "name": "CRM"}
    ```
    Create the token in Colloqui under the channel's webhook settings. Good for
-   one-way "post this notification to this channel" cases.
+   one-way "post this notification to this channel" cases. `text` that is empty
+   or only whitespace is refused with 400.
 
 ## Colloqui to CRM (chat events out): outgoing webhooks
 

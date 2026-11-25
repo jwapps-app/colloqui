@@ -1,16 +1,16 @@
 import uuid
 from datetime import timedelta
-from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import links
+from .. import events, links, storage
 from ..config import settings
-from ..db import get_db
+from ..db import DB, after_commit, commit
 from ..deps import get_admin_user
+from ..membership import ensure_channel_owner, ensure_space_manager
 from ..models import (
     API_KEY_PREFIX,
     ApiKey,
@@ -44,7 +44,7 @@ from ..schemas import (
     InviteOut,
 )
 from ..security import hash_password, hash_token, new_invite_code, new_token
-from ..ws import manager
+from ..vocab import ChannelRole, SpaceRole
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -52,7 +52,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 @router.delete("/users/{user_id}", status_code=204)
 async def delete_user(
     user_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> None:
     """Permanently remove an account. Channels/spaces they created are
@@ -69,8 +69,7 @@ async def delete_user(
     await db.execute(
         update(Channel).where(Channel.created_by == user_id).values(created_by=admin.id)
     )
-    # Spaces too: created_by is NOT NULL but ON DELETE SET NULL, so deleting a
-    # space's creator failed the whole request with a constraint error.
+    # Spaces too, so a space keeps a named creator instead of none.
     await db.execute(
         update(Space).where(Space.created_by == user_id).values(created_by=admin.id)
     )
@@ -82,32 +81,28 @@ async def delete_user(
     # once their memberships cascade away.
     owned_channels = (await db.scalars(
         select(ChannelMember.channel_id).where(
-            ChannelMember.user_id == user_id, ChannelMember.role == "owner")
+            ChannelMember.user_id == user_id, ChannelMember.role == ChannelRole.OWNER)
     )).all()
     managed_spaces = (await db.scalars(
         select(SpaceMember.space_id).where(
-            SpaceMember.user_id == user_id, SpaceMember.role == "manager")
+            SpaceMember.user_id == user_id, SpaceMember.role == SpaceRole.MANAGER)
     )).all()
 
     await db.delete(target)  # cascades sessions, credentials, memberships, messages…
     await db.flush()
-    from .channels import _ensure_channel_owner
-    from .spaces import _ensure_space_manager
-
     for cid in owned_channels:
-        await _ensure_channel_owner(db, cid)
+        await ensure_channel_owner(db, cid)
     for sid in managed_spaces:
-        await _ensure_space_manager(db, sid)
-    await db.commit()
-
-    for file_id in file_ids:
-        (Path(settings.upload_dir) / str(file_id)).unlink(missing_ok=True)
-    (Path(settings.upload_dir) / "avatars" / str(user_id)).unlink(missing_ok=True)
+        await ensure_space_manager(db, sid)
+    # Their blobs go only once the deletion is committed.
+    after_commit(db, storage.unlink_blobs, file_ids)
+    after_commit(db, storage.unlink_avatar, user_id)
+    await commit(db)
 
 
 @router.get("/channels", response_model=list[AdminChannelOut])
 async def list_all_channels(
-    db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
+    db: AsyncSession = DB, admin: User = Depends(get_admin_user)
 ) -> list[AdminChannelOut]:
     rows = (
         await db.execute(
@@ -132,7 +127,7 @@ async def list_all_channels(
 
 @router.get("/users", response_model=list[AdminUserOut])
 async def list_all_users(
-    db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
+    db: AsyncSession = DB, admin: User = Depends(get_admin_user)
 ) -> list[AdminUserOut]:
     users = (await db.scalars(select(User).order_by(User.username))).all()
     has_passkey = set(
@@ -152,7 +147,7 @@ async def list_all_users(
 @router.post("/users", response_model=AdminUserCreatedOut, status_code=201)
 async def create_user(
     body: AdminCreateUserIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> AdminUserCreatedOut:
     """Pre-create an account (no passkey yet). The person enrolls their passkey
@@ -194,7 +189,7 @@ async def create_user(
 async def update_user(
     user_id: uuid.UUID,
     body: AdminUserUpdateIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> User:
     target = await db.get(User, user_id)
@@ -213,14 +208,14 @@ async def update_user(
                 .where(AuthSession.user_id == target.id)
                 .values(revoked=True)
             )
-            await manager.disconnect_user(target.id)
+            events.disconnect_user(db, target.id)
     return target
 
 
 @router.post("/invites", response_model=InviteCreatedOut, status_code=201)
 async def create_invite(
     body: InviteIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> InviteCreatedOut:
     recover_user = None
@@ -250,7 +245,7 @@ async def create_invite(
 
 @router.get("/invites", response_model=list[InviteOut])
 async def list_invites(
-    db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
+    db: AsyncSession = DB, admin: User = Depends(get_admin_user)
 ) -> list[Invite]:
     invites = (
         await db.scalars(select(Invite).order_by(Invite.created_at.desc()))
@@ -261,7 +256,7 @@ async def list_invites(
 @router.delete("/invites/{invite_id}", status_code=204)
 async def revoke_invite(
     invite_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> None:
     invite = await db.get(Invite, invite_id)
@@ -278,7 +273,7 @@ async def revoke_invite(
 @router.post("/api-keys", response_model=ApiKeyCreatedOut, status_code=201)
 async def create_api_key(
     body: ApiKeyIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> ApiKeyCreatedOut:
     user = await db.scalar(select(User).where(User.username == body.username.lower()))
@@ -301,7 +296,7 @@ async def create_api_key(
 
 @router.get("/api-keys", response_model=list[ApiKeyOut])
 async def list_api_keys(
-    db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
+    db: AsyncSession = DB, admin: User = Depends(get_admin_user)
 ) -> list[ApiKeyOut]:
     rows = (
         await db.execute(
@@ -327,7 +322,7 @@ async def list_api_keys(
 @router.delete("/api-keys/{key_id}", status_code=204)
 async def revoke_api_key(
     key_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> None:
     key = await db.get(ApiKey, key_id)
@@ -335,7 +330,7 @@ async def revoke_api_key(
         raise HTTPException(404, "API key not found")
     key.revoked_at = utcnow()
     # A revoked key's open WebSocket would otherwise keep streaming.
-    await manager.disconnect_token(key.token_hash)
+    events.disconnect_token(db, key.token_hash)
 
 
 # ---- Integration: outgoing event subscriptions (webhooks out) ----
@@ -354,7 +349,7 @@ def _sub_out(sub: EventSubscription) -> EventSubOut:
 @router.post("/event-subscriptions", response_model=EventSubCreatedOut, status_code=201)
 async def create_event_subscription(
     body: EventSubIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> EventSubCreatedOut:
     url = body.url.strip()
@@ -385,7 +380,7 @@ async def create_event_subscription(
 
 @router.get("/event-subscriptions", response_model=list[EventSubOut])
 async def list_event_subscriptions(
-    db: AsyncSession = Depends(get_db), admin: User = Depends(get_admin_user)
+    db: AsyncSession = DB, admin: User = Depends(get_admin_user)
 ) -> list[EventSubOut]:
     rows = await db.scalars(
         select(EventSubscription).order_by(EventSubscription.created_at)
@@ -396,7 +391,7 @@ async def list_event_subscriptions(
 @router.delete("/event-subscriptions/{sub_id}", status_code=204)
 async def delete_event_subscription(
     sub_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> None:
     sub = await db.get(EventSubscription, sub_id)

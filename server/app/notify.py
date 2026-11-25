@@ -8,11 +8,11 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import push, webpush
-from .db import SessionLocal
+from . import events, push, webpush
+from .db import SessionLocal, after_commit, commit
 from .models import Notification, Reminder, utcnow
 from .schemas import NotificationOut
-from .ws import manager
+from .vocab import Recurrence
 
 log = logging.getLogger("notify")
 
@@ -40,13 +40,13 @@ def next_occurrence(
     if not recurrence:
         return None
     anchor = anchor or due
-    if recurrence == "daily":
+    if recurrence == Recurrence.DAILY:
         step = lambda k: anchor + timedelta(days=k)  # noqa: E731
-    elif recurrence == "weekly":
+    elif recurrence == Recurrence.WEEKLY:
         step = lambda k: anchor + timedelta(weeks=k)  # noqa: E731
-    elif recurrence == "monthly":
+    elif recurrence == Recurrence.MONTHLY:
         step = lambda k: _add_months(anchor, k)  # noqa: E731
-    elif recurrence == "yearly":
+    elif recurrence == Recurrence.YEARLY:
         step = lambda k: _add_months(anchor, 12 * k)  # noqa: E731
     else:
         return None
@@ -86,7 +86,8 @@ async def notify_user(
         )
         db.add(notification)
         await db.flush()
-        await manager.send_to_users(
+        events.publish(
+            db,
             [user_id],
             {
                 "type": "notification",
@@ -96,7 +97,8 @@ async def notify_user(
             },
         )
     else:
-        await manager.send_to_users(
+        events.publish(
+            db,
             [user_id],
             {"type": "alert", "title": title, "body": body, "data": data},
         )
@@ -118,8 +120,8 @@ async def notify_user(
         # "all"-level alerts). Each is a no-op unless configured; fire-and-forget,
         # never blocks here. APNs reaches the native iOS app; web push reaches
         # installed PWAs (incl. iOS) when they're backgrounded or closed.
-        push.schedule(user_id, title, body, data, badge or 0)
-        webpush.schedule(user_id, title, body, data, badge or 0)
+        after_commit(db, push.schedule, user_id, title, body, data, badge or 0)
+        after_commit(db, webpush.schedule, user_id, title, body, data, badge or 0)
     return notification
 
 
@@ -163,7 +165,7 @@ async def reminder_loop() -> None:
                         },
                     )
                 if due:
-                    await db.commit()
+                    await commit(db)
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -1,16 +1,15 @@
 import asyncio
 import logging
 import os
-import re
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import models  # noqa: F401 — registers tables on Base.metadata
-from . import ws
+from . import assets, storage, ws
 from .config import settings
 from .db import engine
 from .notify import reminder_loop
@@ -22,6 +21,7 @@ from .routes import (
     devices,
     files,
     messages,
+    meta,
     notifications,
     reminders,
     spaces,
@@ -30,52 +30,18 @@ from .routes import (
     webpush,
 )
 
-# Schema is managed by Alembic (`alembic upgrade head` runs at container start,
-# see the Dockerfile). The lifespan only does app-level data seeding.
-
-
-async def migrate_existing_to_default_space() -> None:
-    """One-time: if channels exist but no space does, create a default 'Main'
-    space, enroll all users, and move existing channels into it. Idempotent —
-    skips once any space exists."""
-    from sqlalchemy import select, update
-
-    from .db import SessionLocal
-    from .models import Channel, Space, SpaceMember, User
-
-    async with SessionLocal() as db:
-        if await db.scalar(select(Space.id).limit(1)) is not None:
-            return
-        users = (await db.scalars(select(User).order_by(User.created_at))).all()
-        if not users:
-            return  # fresh server; first registration creates the space
-        space = Space(name="Main", is_default=True, created_by=users[0].id)
-        db.add(space)
-        await db.flush()
-        for u in users:
-            db.add(
-                SpaceMember(
-                    space_id=space.id,
-                    user_id=u.id,
-                    role="manager" if u.is_admin else "member",
-                )
-            )
-        await db.execute(
-            update(Channel)
-            .where(Channel.is_dm == False, Channel.space_id.is_(None))  # noqa: E712
-            .values(space_id=space.id)
-        )
-        await db.commit()
+# Schema AND one-time data fixes are managed by Alembic (`alembic upgrade head`
+# runs at container start, see the Dockerfile). Startup does no data work.
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Schema migrations have already run (Alembic, at container start).
-    Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
+    storage.upload_root().mkdir(parents=True, exist_ok=True)
     # The image runs as a non-root user; a host bind mount that Docker created
     # as root is unwritable. Say so loudly at startup instead of failing the
     # first upload (and the VAPID key write) with an opaque 500.
-    if not os.access(settings.upload_dir, os.W_OK):
+    if not os.access(storage.upload_root(), os.W_OK):
         logging.getLogger("colloqui").error(
             "UPLOAD_DIR %s is not writable by the service user (uid %s): uploads, "
             "avatars and the auto-generated VAPID key will fail. Fix the host "
@@ -87,7 +53,6 @@ async def lifespan(app: FastAPI):
     from . import webpush as _webpush
 
     _webpush.ensure_keys()
-    await migrate_existing_to_default_space()
     scheduler = asyncio.create_task(reminder_loop())
     yield
     scheduler.cancel()
@@ -169,11 +134,6 @@ class BodyLimitMiddleware:
 app.add_middleware(BodyLimitMiddleware)
 
 
-# Only genuine static assets get the year-long immutable cache; a `?v=` on any
-# other URL (e.g. the private calendar feed) must not turn it public/immutable.
-_STATIC_ASSET = re.compile(r"\.(js|mjs|css|png|ico|svg|json|woff2?)$")
-
-
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
@@ -197,21 +157,30 @@ async def security_headers(request: Request, call_next):
         # API responses and the private calendar feed must never be cached by
         # a shared cache or survive in a browser after sign-out.
         response.headers.setdefault("Cache-Control", "no-store")
-    elif request.query_params.get("v") and _STATIC_ASSET.search(path):
-        # Version-stamped assets (app.js?v=N, icons?v=N) never change under a
-        # given URL, so cache them for a year and skip the revalidation round
-        # trip. A new release bumps ?v=, which is a fresh URL, so updates land.
+    elif path.startswith(assets.asset_prefix()):
+        # Assets of the CURRENT build never change under their URL (the build
+        # id is a hash of the files), so cache them for a year and skip the
+        # revalidation round trip. A new release is a new URL.
         response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
     else:
-        # index.html, sw.js, manifest.json: always revalidate (cheap 304 via
-        # ETag) so a new release's ?v= bump is picked up on the next reload.
+        # index.html, sw.js, manifest.json, and assets requested under any
+        # OTHER build id (a stale page): always revalidate, so the next reload
+        # picks up the new build and nothing stale is pinned in a cache.
         response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True, "version": settings.app_version}
+    # `build` identifies the web client being served; an open client compares
+    # it with its own to know when to reload (static/js/update.js).
+    return {"ok": True, "version": settings.app_version, "build": assets.build_id()}
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/index.html", response_class=HTMLResponse, include_in_schema=False)
+async def index() -> str:
+    return assets.index_html()
 
 
 for router in (
@@ -222,6 +191,7 @@ for router in (
     channels.router,
     messages.router,
     files.router,
+    meta.router,
     reminders.router,
     notifications.router,
     devices.router,
@@ -233,7 +203,8 @@ for router in (
 ):
     app.include_router(router)
 
-# Built-in web client (also serves as the dev/reference client for the API).
-app.mount(
-    "/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="static"
-)
+# Built-in web client. Versioned assets live under /assets/<build>/ (see
+# assets.py); the root mount serves the few files that need a fixed URL
+# (sw.js, manifest.json, icons for the installed app).
+app.mount("/assets/{build}", StaticFiles(directory=assets.STATIC_DIR), name="assets")
+app.mount("/", StaticFiles(directory=assets.STATIC_DIR), name="static")

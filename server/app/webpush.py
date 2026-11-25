@@ -23,6 +23,7 @@ from pathlib import Path
 
 from sqlalchemy import delete, select
 
+from . import background, storage
 from .config import settings
 from .db import SessionLocal
 from .models import PushSubscription
@@ -35,15 +36,11 @@ log = logging.getLogger("webpush")
 # keeps web push cleanly off.
 _keys: dict | None = None
 
-# Strong refs to in-flight delivery tasks so the loop's weak task-holding can't
-# GC them mid-send (see push.py for the same guard).
-_inflight: set[asyncio.Task] = set()
-
 
 def _key_file() -> Path:
     """Where the auto-managed keypair is persisted — on the data volume, so it
     survives restarts (a changed key would invalidate every subscription)."""
-    return Path(settings.upload_dir) / "vapid.json"
+    return storage.vapid_key_path()
 
 
 def _public_b64(vapid) -> str:
@@ -147,19 +144,43 @@ def public_key() -> str:
     return _keys["public"] if _keys else ""
 
 
-async def _deliver(
-    user_id: uuid.UUID, title: str, body: str, data: dict | None, badge: int
-) -> None:
+async def _post(
+    keys: dict, endpoint: str, p256dh: str, auth: str, payload: str, ttl: int
+) -> tuple[bool, int | None, str | None]:
+    """POST one push to one subscription. Returns (ok, HTTP status, error
+    text). The ONLY place the push library is called, so delivery and the
+    diagnostic test cannot disagree about how a push is sent."""
     from pywebpush import WebPushException, webpush
 
-    keys = _keys
-    if keys is None:
-        return
+    info = {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
+    try:
+        resp = await asyncio.to_thread(
+            webpush,
+            subscription_info=info,
+            data=payload,
+            vapid_private_key=keys["vapid"],
+            # Fresh dict per call: pywebpush mutates it (adds aud/exp).
+            vapid_claims={"sub": keys["subject"]},
+            ttl=ttl,
+            # pywebpush uses requests, whose default is NO timeout; a hung
+            # push service would otherwise pin a worker thread forever.
+            timeout=10,
+        )
+        return True, getattr(resp, "status_code", 0), None
+    except WebPushException as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        return False, status, str(e)[:160]
+    except Exception as e:  # noqa: BLE001
+        log.exception("web push send error")
+        return False, None, str(e)[:160]
+
+
+async def _subscriptions(user_id: uuid.UUID) -> list[tuple[str, str, str]]:
     # Short session: snapshot the subscriptions and let the connection go —
     # holding it across the network fan-out starved the pool under load (the
     # exact starvation push.py already fixed for APNs tokens).
     async with SessionLocal() as db:
-        subs = [
+        return [
             (s.endpoint, s.p256dh, s.auth)
             for s in (
                 await db.scalars(
@@ -167,47 +188,35 @@ async def _deliver(
                 )
             ).all()
         ]
-    if not subs:
+
+
+async def _deliver(
+    user_id: uuid.UUID, title: str, body: str, data: dict | None, badge: int
+) -> None:
+    keys = _keys
+    if keys is None:
         return
     # Defence in depth for rows that predate endpoint validation at subscribe
     # time: never POST to anything but an https public push service.
-    subs = [s for s in subs if await _endpoint_ok(s[0])]
+    subs = [s for s in await _subscriptions(user_id) if await _endpoint_ok(s[0])]
     if not subs:
         return
     payload = json.dumps(
         {"title": title, "body": body, "data": data or {}, "badge": badge}
     )
-
-    async def _send(endpoint: str, p256dh: str, auth: str) -> str | None:
-        """Deliver to one subscription; return its endpoint if it's dead (to
-        be pruned), else None."""
-        info = {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
-        try:
-            await asyncio.to_thread(
-                webpush,
-                subscription_info=info,
-                data=payload,
-                vapid_private_key=keys["vapid"],
-                # Fresh dict per call: pywebpush mutates it (adds aud/exp).
-                vapid_claims={"sub": keys["subject"]},
-                ttl=86400,
-                # pywebpush uses requests, whose default is NO timeout; a hung
-                # push service would otherwise pin a worker thread forever.
-                timeout=10,
-            )
-        except WebPushException as e:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            if status in (404, 410):
-                return endpoint
-            log.warning("web push failed (%s): %s", status, e)
-        except Exception:
-            log.exception("web push send error")
-        return None
-
     # Fan the sends out concurrently — a user with 2-3 PWA installs otherwise
     # paid that many push-service round-trips back to back (mirrors push.py).
-    results = await asyncio.gather(*[_send(*sub) for sub in subs])
-    dead = [endpoint for endpoint in results if endpoint]
+    results = await asyncio.gather(
+        *[_post(keys, endpoint, p256dh, auth, payload, 86400) for endpoint, p256dh, auth in subs]
+    )
+    dead = []
+    for (endpoint, _, _), (ok, status, error) in zip(subs, results):
+        if ok:
+            continue
+        if status in (404, 410):
+            dead.append(endpoint)  # the push service says this subscription is gone
+        else:
+            log.warning("web push failed (%s): %s", status, error)
     if dead:
         # Re-open a session only for the prune, after the network work is done.
         async with SessionLocal() as db:
@@ -215,13 +224,6 @@ async def _deliver(
                 delete(PushSubscription).where(PushSubscription.endpoint.in_(dead))
             )
             await db.commit()
-
-
-async def _safe_deliver(user_id, title, body, data, badge) -> None:
-    try:
-        await _deliver(user_id, title, body, data, badge)
-    except Exception:
-        log.exception("web push delivery failed for user %s", user_id)
 
 
 def schedule(
@@ -237,19 +239,15 @@ def schedule(
     into the caller."""
     if not web_push_enabled():
         return
-    # Keep a strong ref — the loop holds tasks only weakly, so an unreferenced
-    # create_task() can be GC'd mid-flight and the push silently never arrives.
-    task = asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))
-    _inflight.add(task)
-    task.add_done_callback(_inflight.discard)
+    background.spawn(
+        _deliver(user_id, title, body, data, badge), f"web push to user {user_id}"
+    )
 
 
 async def send_test(user_id: uuid.UUID) -> dict:
     """Diagnostic: synchronously push a test notification to each of the user's
     subscriptions and report the per-subscription outcome. Unlike _deliver it
     does NOT prune, so failures (and their status codes) stay visible."""
-    from pywebpush import WebPushException, webpush
-
     keys = _keys
     if keys is None:
         return {"enabled": False, "count": 0, "results": []}
@@ -262,42 +260,15 @@ async def send_test(user_id: uuid.UUID) -> dict:
         }
     )
     results: list[dict] = []
-    async with SessionLocal() as db:
-        subs = (
-            await db.scalars(
-                select(PushSubscription).where(PushSubscription.user_id == user_id)
-            )
-        ).all()
-        for sub in subs:
-            host = sub.endpoint.split("/")[2] if "://" in sub.endpoint else sub.endpoint[:40]
-            if not await _endpoint_ok(sub.endpoint):
-                results.append({"host": host, "ok": False, "status": None,
-                                "error": "endpoint refused: not a public https push service"})
-                continue
-            info = {
-                "endpoint": sub.endpoint,
-                "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
-            }
-            try:
-                resp = await asyncio.to_thread(
-                    webpush,
-                    subscription_info=info,
-                    data=payload,
-                    vapid_private_key=keys["vapid"],
-                    vapid_claims={"sub": keys["subject"]},
-                    ttl=60,
-                    timeout=10,
-                )
-                results.append(
-                    {"host": host, "ok": True, "status": getattr(resp, "status_code", 0)}
-                )
-            except WebPushException as e:
-                status = getattr(getattr(e, "response", None), "status_code", None)
-                results.append(
-                    {"host": host, "ok": False, "status": status, "error": str(e)[:160]}
-                )
-            except Exception as e:  # noqa: BLE001
-                results.append(
-                    {"host": host, "ok": False, "status": None, "error": str(e)[:160]}
-                )
+    for endpoint, p256dh, auth in await _subscriptions(user_id):
+        host = endpoint.split("/")[2] if "://" in endpoint else endpoint[:40]
+        if not await _endpoint_ok(endpoint):
+            results.append({"host": host, "ok": False, "status": None,
+                            "error": "endpoint refused: not a public https push service"})
+            continue
+        ok, status, error = await _post(keys, endpoint, p256dh, auth, payload, 60)
+        result = {"host": host, "ok": ok, "status": status}
+        if not ok:
+            result["error"] = error
+        results.append(result)
     return {"enabled": True, "count": len(results), "results": results}

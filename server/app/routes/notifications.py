@@ -5,7 +5,7 @@ from sqlalchemy import cast, delete, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_db
+from ..db import DB
 from ..deps import get_current_user
 from ..models import Notification, User, utcnow
 from ..schemas import NotificationOut
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
 @router.get("", response_model=list[NotificationOut])
 async def list_notifications(
     limit: int = Query(default=50, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> list[Notification]:
     notifications = await db.scalars(
@@ -30,7 +30,7 @@ async def list_notifications(
 
 @router.post("/read-all")
 async def mark_all_read(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> dict:
     await db.execute(
         update(Notification)
@@ -43,7 +43,7 @@ async def mark_all_read(
 @router.post("/read-channel/{channel_id}")
 async def mark_channel_read(
     channel_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> dict:
     """Mark the caller's unread notifications for one channel as read — called
@@ -63,7 +63,7 @@ async def mark_channel_read(
 
 @router.delete("", status_code=204)
 async def clear_notifications(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> None:
     """Clear (delete) all of the caller's notifications."""
     await db.execute(delete(Notification).where(Notification.user_id == user.id))
@@ -72,7 +72,7 @@ async def clear_notifications(
 @router.delete("/{notification_id}", status_code=204)
 async def dismiss_notification(
     notification_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     """Dismiss (delete) a single notification."""

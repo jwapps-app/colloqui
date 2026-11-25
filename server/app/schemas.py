@@ -1,10 +1,16 @@
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-USERNAME_PATTERN = r"^[A-Za-z0-9_]{3,32}$"
+from .vocab import (
+    DEFAULT_NOTIFY_LEVEL,
+    USERNAME_PATTERN,
+    NotifyLevel,
+    Recurrence,
+    SpaceRole,
+)
 
 
 class UserOut(BaseModel):
@@ -105,11 +111,11 @@ class SpaceOrderIn(BaseModel):
 
 class SpaceMemberIn(BaseModel):
     user_id: uuid.UUID
-    role: str = Field(default="member", pattern=r"^(member|manager)$")
+    role: SpaceRole = SpaceRole.MEMBER
 
 
 class SpaceMemberRoleIn(BaseModel):
-    role: str = Field(pattern=r"^(member|manager)$")
+    role: SpaceRole
 
 
 class SpaceMemberOut(UserOut):
@@ -153,7 +159,7 @@ class ChannelOut(BaseModel):
     reminder_count: int = 0
     pinned_count: int = 0
     thread_count: int = 0  # active threads (recent activity)
-    notify_level: str = "all"  # all | mentions | muted
+    notify_level: NotifyLevel = DEFAULT_NOTIFY_LEVEL
 
 
 class MemberIn(BaseModel):
@@ -161,7 +167,7 @@ class MemberIn(BaseModel):
 
 
 class NotifyPrefIn(BaseModel):
-    level: str = Field(pattern=r"^(all|mentions|muted)$")
+    level: NotifyLevel
 
 
 class DeviceRegisterIn(BaseModel):
@@ -432,15 +438,12 @@ class EventSubCreatedOut(EventSubOut):
     secret: str  # plaintext, shown exactly once
 
 
-RECURRENCE_PATTERN = r"^(daily|weekly|monthly|yearly)$"
-
-
 class ReminderIn(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     due_at: datetime
     channel_id: uuid.UUID | None = None
     message_id: uuid.UUID | None = None
-    recurrence: str | None = Field(default=None, pattern=RECURRENCE_PATTERN)
+    recurrence: Recurrence | None = None
     # Client-generated id so reminders created offline replay idempotently on
     # reconnect (same pattern as messages): a resend returns the existing row.
     id: uuid.UUID | None = None
@@ -463,7 +466,7 @@ class ReminderUpdateIn(BaseModel):
     text: str | None = Field(default=None, min_length=1, max_length=500)
     due_at: datetime | None = None
     # "" clears recurrence (back to one-shot); a keyword sets it.
-    recurrence: str | None = Field(default=None, pattern=r"^(|daily|weekly|monthly|yearly)$")
+    recurrence: Recurrence | Literal[""] | None = None
 
 
 class NotificationOut(BaseModel):

@@ -8,11 +8,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..db import get_db
+from .. import storage
+from ..access import require_member
+from ..db import DB
 from ..deps import get_current_user
 from ..models import File, User
 from ..schemas import FileOut
-from .channels import require_member
 
 router = APIRouter(prefix="/api/v1", tags=["files"])
 
@@ -25,14 +26,14 @@ INLINE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 async def upload_file(
     channel_id: uuid.UUID,
     upload: UploadFile,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> File:
     await require_member(db, channel_id, user)
     max_bytes = settings.max_file_size_mb * 1024 * 1024
     file_id = uuid.uuid4()
     # Blobs are stored under our own UUID — client filenames never touch paths.
-    dest = Path(settings.upload_dir) / str(file_id)
+    dest = storage.blob_path(file_id)
     # Per-user storage quota, checked before we accept more bytes.
     quota = settings.max_storage_per_user_mb * 1024 * 1024
     used = await db.scalar(
@@ -85,14 +86,14 @@ async def upload_file(
 @router.get("/files/{file_id}")
 async def download_file(
     file_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> FileResponse:
     record = await db.get(File, file_id)
     if record is None:
         raise HTTPException(404, "File not found")
     await require_member(db, record.channel_id, user)
-    path = Path(settings.upload_dir) / str(record.id)
+    path = storage.blob_path(record.id)
     if not path.is_file():
         raise HTTPException(404, "File not found")
     disposition = "inline" if record.content_type in INLINE_TYPES else "attachment"

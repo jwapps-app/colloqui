@@ -1,13 +1,19 @@
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import settings
-from ..db import get_db
+from ..access import require_space_manager, require_space_member
+from .. import events, storage
+from ..db import DB, after_commit, commit
 from ..deps import get_admin_user, get_current_user
+from ..membership import (
+    add_to_space,
+    ensure_channel_owner,
+    ensure_space_manager,
+    space_member_ids,
+)
 from ..models import (
     Channel,
     ChannelMember,
@@ -25,81 +31,9 @@ from ..schemas import (
     SpaceOut,
     UserOut,
 )
-from ..ws import manager
+from ..vocab import SpaceRole
 
 router = APIRouter(prefix="/api/v1/spaces", tags=["spaces"])
-
-
-async def ensure_default_space(db: AsyncSession, creator_id: uuid.UUID) -> Space:
-    """The 'everyone' space new users auto-join. Created on demand."""
-    space = await db.scalar(select(Space).where(Space.is_default == True))  # noqa: E712
-    if space is None:
-        space = Space(name="Main", is_default=True, created_by=creator_id)
-        db.add(space)
-        await db.flush()
-    return space
-
-
-async def add_to_space(
-    db: AsyncSession, space_id: uuid.UUID, user_id: uuid.UUID, role: str = "member"
-) -> None:
-    """Add a user to a space and auto-join its public channels."""
-    if await db.get(SpaceMember, (space_id, user_id)) is None:
-        db.add(SpaceMember(space_id=space_id, user_id=user_id, role=role))
-    public = (
-        await db.scalars(
-            select(Channel.id).where(
-                Channel.space_id == space_id,
-                Channel.is_private == False,  # noqa: E712
-                Channel.is_dm == False,  # noqa: E712
-            )
-        )
-    ).all()
-    if not public:
-        return
-    # One query for the memberships the user already has (was one get per channel).
-    already = set(
-        (
-            await db.scalars(
-                select(ChannelMember.channel_id).where(
-                    ChannelMember.channel_id.in_(public),
-                    ChannelMember.user_id == user_id,
-                )
-            )
-        ).all()
-    )
-    for channel_id in public:
-        if channel_id not in already:
-            db.add(ChannelMember(channel_id=channel_id, user_id=user_id))
-
-
-async def require_space_member(
-    db: AsyncSession, space_id: uuid.UUID, user: User
-) -> Space:
-    space = await db.get(Space, space_id)
-    if space is None:
-        raise HTTPException(404, "Space not found")
-    if user.is_admin:
-        return space
-    if await db.get(SpaceMember, (space_id, user.id)) is None:
-        raise HTTPException(404, "Space not found")  # don't leak existence
-    return space
-
-
-async def require_space_manager(
-    db: AsyncSession, space_id: uuid.UUID, user: User
-) -> Space:
-    space = await db.get(Space, space_id)
-    if space is None:
-        raise HTTPException(404, "Space not found")
-    if user.is_admin:
-        return space
-    member = await db.get(SpaceMember, (space_id, user.id))
-    if member is None:
-        raise HTTPException(404, "Space not found")
-    if member.role != "manager":
-        raise HTTPException(403, "Only a space manager can do that")
-    return space
 
 
 def space_out(space: Space, role: str | None) -> SpaceOut:
@@ -110,7 +44,7 @@ def space_out(space: Space, role: str | None) -> SpaceOut:
 
 @router.get("", response_model=list[SpaceOut])
 async def my_spaces(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> list[SpaceOut]:
     rows = (
         await db.execute(
@@ -135,7 +69,7 @@ async def my_spaces(
 @router.put("/order", status_code=204)
 async def reorder_spaces(
     body: SpaceOrderIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> None:
     """Set the global top-to-bottom order of spaces (admin only). `order` is the
@@ -153,7 +87,7 @@ async def reorder_spaces(
 @router.post("", response_model=SpaceOut, status_code=201)
 async def create_space(
     body: SpaceIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> SpaceOut:
     max_pos = await db.scalar(select(func.max(Space.position)))
@@ -162,32 +96,31 @@ async def create_space(
     )
     db.add(space)
     await db.flush()
-    db.add(SpaceMember(space_id=space.id, user_id=admin.id, role="manager"))
-    return space_out(space, "manager")
+    db.add(SpaceMember(space_id=space.id, user_id=admin.id, role=SpaceRole.MANAGER))
+    return space_out(space, SpaceRole.MANAGER)
 
 
 @router.patch("/{space_id}", response_model=SpaceOut)
 async def update_space(
     space_id: uuid.UUID,
     body: SpaceIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> SpaceOut:
     space = await require_space_manager(db, space_id, user)
     space.name = body.name.strip()
     member = await db.get(SpaceMember, (space_id, user.id))
     await db.flush()
-    member_ids = (
-        await db.scalars(select(SpaceMember.user_id).where(SpaceMember.space_id == space_id))
-    ).all()
-    await manager.send_to_users(member_ids, {"type": "channels.changed"})
+    events.publish(
+        db, await space_member_ids(db, space_id), {"type": "channels.changed"}
+    )
     return space_out(space, member.role if member else None)
 
 
 @router.delete("/{space_id}", status_code=204)
 async def delete_space(
     space_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     admin: User = Depends(get_admin_user),
 ) -> None:
     space = await db.get(Space, space_id)
@@ -195,9 +128,7 @@ async def delete_space(
         raise HTTPException(404, "Space not found")
     if space.is_default:
         raise HTTPException(400, "The default space can't be deleted")
-    member_ids = (
-        await db.scalars(select(SpaceMember.user_id).where(SpaceMember.space_id == space_id))
-    ).all()
+    member_ids = await space_member_ids(db, space_id)
     file_ids = (
         await db.scalars(
             select(File.id)
@@ -206,16 +137,15 @@ async def delete_space(
         )
     ).all()
     await db.delete(space)  # cascades channels → messages → members
-    await db.commit()
-    for file_id in file_ids:
-        (Path(settings.upload_dir) / str(file_id)).unlink(missing_ok=True)
-    await manager.send_to_users(member_ids, {"type": "channels.changed"})
+    events.publish(db, member_ids, {"type": "channels.changed"})
+    after_commit(db, storage.unlink_blobs, file_ids)
+    await commit(db)
 
 
 @router.get("/{space_id}/members", response_model=list[SpaceMemberOut])
 async def list_space_members(
     space_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> list[SpaceMemberOut]:
     await require_space_member(db, space_id, user)
@@ -237,7 +167,7 @@ async def list_space_members(
 async def add_space_member(
     space_id: uuid.UUID,
     body: SpaceMemberIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> SpaceMemberOut:
     await require_space_manager(db, space_id, user)
@@ -246,7 +176,7 @@ async def add_space_member(
         raise HTTPException(404, "User not found")
     await add_to_space(db, space_id, target.id, body.role)
     await db.flush()
-    await manager.send_to_users([target.id], {"type": "channels.changed"})
+    events.publish(db, [target.id], {"type": "channels.changed"})
     return SpaceMemberOut(**UserOut.model_validate(target).model_dump(), role=body.role)
 
 
@@ -255,7 +185,7 @@ async def set_member_role(
     space_id: uuid.UUID,
     user_id: uuid.UUID,
     body: SpaceMemberRoleIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> SpaceMemberOut:
     await require_space_manager(db, space_id, user)
@@ -271,7 +201,7 @@ async def set_member_role(
 async def remove_space_member(
     space_id: uuid.UUID,
     user_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     space = await require_space_manager(db, space_id, user)
@@ -280,7 +210,7 @@ async def remove_space_member(
     member = await db.get(SpaceMember, (space_id, user_id))
     if member is None:
         raise HTTPException(404, "Member not found")
-    was_manager = member.role == "manager"
+    was_manager = member.role == SpaceRole.MANAGER
     await db.delete(member)
     # Drop their membership of every channel in this space in one statement.
     await db.execute(
@@ -293,38 +223,13 @@ async def remove_space_member(
     )
     await db.flush()
     if was_manager:
-        await _ensure_space_manager(db, space_id)
+        await ensure_space_manager(db, space_id)
     # Channels they owned in this space need an owner too.
-    from .channels import _ensure_channel_owner
-
     owned = await db.scalars(
         select(Channel.id).where(
             Channel.space_id == space_id, Channel.is_dm == False  # noqa: E712
         )
     )
     for cid in owned.all():
-        await _ensure_channel_owner(db, cid)
-    await manager.send_to_users([user_id], {"type": "channels.changed"})
-
-
-async def _ensure_space_manager(db: AsyncSession, space_id: uuid.UUID) -> None:
-    """If a space is left with members but no manager, the longest-standing
-    member inherits the role so the space never depends on a server admin for
-    routine membership changes."""
-    has_mgr = await db.scalar(
-        select(SpaceMember.user_id).where(
-            SpaceMember.space_id == space_id, SpaceMember.role == "manager"
-        ).limit(1)
-    )
-    if has_mgr is not None:
-        return
-    heir = await db.scalar(
-        select(SpaceMember)
-        .where(SpaceMember.space_id == space_id)
-        .order_by(SpaceMember.joined_at, SpaceMember.user_id)
-        .limit(1)
-    )
-    if heir is not None:
-        heir.role = "manager"
-        await db.flush()
-        await manager.send_to_users([heir.user_id], {"type": "channels.changed"})
+        await ensure_channel_owner(db, cid)
+    events.publish(db, [user_id], {"type": "channels.changed"})

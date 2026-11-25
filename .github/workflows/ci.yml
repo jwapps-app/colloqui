@@ -33,11 +33,19 @@ jobs:
         working-directory: server
         run: pip install -r requirements-dev.txt
 
-      - name: Syntax-check web client JS
-        run: node --check server/app/static/app.js
+      # The web client's modules are syntax-checked and unit-tested under Node,
+      # from pytest (tests/test_client_js.py). No npm packages are involved.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Lint
+        working-directory: server
+        run: ruff check
 
       - name: Run tests
         working-directory: server
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+          REQUIRE_NODE: "1"
         run: python -m pytest -q

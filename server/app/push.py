@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy import delete, select, update
 
+from . import background
 from .config import settings
 from .db import SessionLocal
 from .models import DeviceToken
@@ -61,12 +62,6 @@ _DANGLING = "\u200d \t\r\n"
 # TCP+TLS handshake to the relay every time, and a channel-wide fanout opened
 # dozens at once. The connection limit also caps that thundering herd.
 _client: httpx.AsyncClient | None = None
-
-# Keep strong references to in-flight sends — the event loop holds tasks only
-# weakly, so an unreferenced create_task() can be garbage-collected mid-flight
-# (the push silently never arrives).
-_inflight: set[asyncio.Task] = set()
-
 
 def _relay_client() -> httpx.AsyncClient:
     global _client
@@ -287,13 +282,6 @@ async def _deliver(
     return sum(o.sent for o in outcomes)
 
 
-async def _safe_deliver(user_id, title, body, data, badge) -> None:
-    try:
-        await _deliver(user_id, title, body, data, badge)
-    except Exception:
-        log.exception("push delivery failed for user %s", user_id)
-
-
 def schedule(
     user_id: uuid.UUID,
     title: str,
@@ -306,6 +294,6 @@ def schedule(
     No-op unless the relay is configured; never blocks or raises into the caller."""
     if not push_enabled():
         return
-    task = asyncio.create_task(_safe_deliver(user_id, title, body, data, badge))
-    _inflight.add(task)
-    task.add_done_callback(_inflight.discard)
+    background.spawn(
+        _deliver(user_id, title, body, data, badge), f"push to user {user_id}"
+    )

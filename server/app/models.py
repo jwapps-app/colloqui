@@ -5,6 +5,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -16,6 +17,13 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .vocab import ChannelRole, NotifyLevel, Recurrence, SpaceRole
+
+
+def _one_of(column: str, values, *, nullable: bool = False) -> str:
+    """SQL for "this column holds one of the vocabulary's values"."""
+    listed = ", ".join(f"'{v.value}'" for v in values)
+    return (f"{column} IS NULL OR " if nullable else "") + f"{column} IN ({listed})"
 
 
 def utcnow() -> datetime:
@@ -149,12 +157,18 @@ class Space(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     # Manual sort order in the sidebar (lower = higher up); rearrangeable by admins.
     position: Mapped[int] = mapped_column(Integer, default=0)
-    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # Nullable on purpose: the creator's account can be deleted (SET NULL).
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class SpaceMember(Base):
     __tablename__ = "space_members"
+    __table_args__ = (
+        CheckConstraint(_one_of("role", SpaceRole), name="ck_space_members_role"),
+    )
 
     space_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("spaces.id", ondelete="CASCADE"), primary_key=True
@@ -162,7 +176,7 @@ class SpaceMember(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
     )
-    role: Mapped[str] = mapped_column(String(16), default="member")  # member | manager
+    role: Mapped[str] = mapped_column(String(16), default=SpaceRole.MEMBER)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -186,6 +200,9 @@ class Channel(Base):
 
 class ChannelMember(Base):
     __tablename__ = "channel_members"
+    __table_args__ = (
+        CheckConstraint(_one_of("role", ChannelRole), name="ck_channel_members_role"),
+    )
 
     channel_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("channels.id", ondelete="CASCADE"), primary_key=True
@@ -193,7 +210,7 @@ class ChannelMember(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
     )
-    role: Mapped[str] = mapped_column(String(16), default="member")  # member | owner
+    role: Mapped[str] = mapped_column(String(16), default=ChannelRole.MEMBER)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -225,8 +242,8 @@ class Webhook(Base):
     )
     name: Mapped[str] = mapped_column(String(64))
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    created_by: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -234,9 +251,12 @@ class Webhook(Base):
 
 class ChannelNotifyPref(Base):
     """Per-user, per-channel notification level. Absence of a row means the
-    default ('all' — see DEFAULT_NOTIFY_LEVEL in routes/channels.py)."""
+    default (see DEFAULT_NOTIFY_LEVEL in vocab.py)."""
 
     __tablename__ = "channel_notify_prefs"
+    __table_args__ = (
+        CheckConstraint(_one_of("level", NotifyLevel), name="ck_channel_notify_prefs_level"),
+    )
 
     channel_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("channels.id", ondelete="CASCADE"), primary_key=True
@@ -244,7 +264,7 @@ class ChannelNotifyPref(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
     )
-    level: Mapped[str] = mapped_column(String(16))  # all | mentions | muted
+    level: Mapped[str] = mapped_column(String(16))
 
 
 class Reaction(Base):
@@ -279,6 +299,12 @@ class TaskCompletion(Base):
 
 class Reminder(Base):
     __tablename__ = "reminders"
+    __table_args__ = (
+        CheckConstraint(
+            _one_of("recurrence", Recurrence, nullable=True),
+            name="ck_reminders_recurrence",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -294,7 +320,7 @@ class Reminder(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # None = one-shot; else daily|weekly|monthly|yearly. Recurring reminders keep
+    # None = one-shot; else a vocab.Recurrence value. Recurring reminders keep
     # fired_at NULL and roll due_at forward to the next occurrence when they fire.
     recurrence: Mapped[str | None] = mapped_column(String(16))
     # The original due time a recurring reminder counts from, so month-end and
@@ -303,9 +329,8 @@ class Reminder(Base):
 
 
 class Notification(Base):
-    """Generic notification inbox. Today delivered via WebSocket (+ browser
-    notifications); the future iOS APNs push hooks into the same dispatch
-    point in notify.notify_user()."""
+    """Generic notification inbox. Every notification is created and delivered
+    (WebSocket, Web Push, APNs relay) by notify.notify_user(), nowhere else."""
 
     __tablename__ = "notifications"
 
@@ -313,7 +338,7 @@ class Notification(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    type: Mapped[str] = mapped_column(String(32))  # reminder | (future: mention, dm…)
+    type: Mapped[str] = mapped_column(String(32))  # reminder | mention | dm | thread | channel
     title: Mapped[str] = mapped_column(String(100))
     body: Mapped[str] = mapped_column(String(500))
     data: Mapped[dict | None] = mapped_column(JSON)

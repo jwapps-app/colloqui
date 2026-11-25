@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
+from . import background
 from .db import SessionLocal
 from .deps import user_from_token
 from .models import ChannelMember, User, utcnow
@@ -24,19 +25,9 @@ SEND_TIMEOUT = 5.0
 # How often a long-lived socket re-validates its token (catches expiry).
 REVALIDATE_SECONDS = 300
 
-_bg: set[asyncio.Task] = set()
-
-
 def _fire(coro) -> None:
-    """Fire-and-forget with a strong ref (the loop holds tasks only weakly)."""
-    async def _safe():
-        try:
-            await coro
-        except Exception:
-            pass
-    task = asyncio.create_task(_safe())
-    _bg.add(task)
-    task.add_done_callback(_bg.discard)
+    """Close a socket without waiting for it (the peer may already be gone)."""
+    background.spawn(coro, "socket close", quiet=True)
 
 
 class ConnectionManager:

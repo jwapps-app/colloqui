@@ -3,7 +3,7 @@
 // network, falling back to cache only when offline. API/websocket traffic is
 // passed straight through (never cached) so live data is always fresh.
 
-const CACHE = 'colloqui-shell-v1';
+const CACHE = 'colloqui-shell-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 
@@ -52,6 +52,22 @@ self.addEventListener('push', (event) => {
 // looking at the app (or has read a channel). Without this, Web Push
 // notifications linger in the Android shade and keep a "dot" on the app icon
 // even after everything's been read. Optionally clears the app-icon badge too.
+// The page tells us which build it is running. Assets are cached under
+// /assets/<build>/, so every other build's entries are dead weight: drop them
+// (otherwise each release would leave a full copy of the app in the cache).
+self.addEventListener('message', (event) => {
+  const m = event.data || {};
+  if (m.type !== 'prune-assets' || !m.build) return;
+  const keep = '/assets/' + m.build + '/';
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    for (const req of await cache.keys()) {
+      const path = new URL(req.url).pathname;
+      if (path.startsWith('/assets/') && !path.startsWith(keep)) await cache.delete(req);
+    }
+  })());
+});
+
 self.addEventListener('message', (event) => {
   const m = event.data || {};
   if (m.type !== 'clear-notifications') return;

@@ -14,16 +14,12 @@ import uuid
 import httpx
 from sqlalchemy import select
 
-from . import links
+from . import background, links
 from .config import settings
 from .db import SessionLocal
 from .models import EventSubscription, utcnow
 
 log = logging.getLogger("colloqui.webhooks_out")
-
-# Strong refs to scheduled dispatch tasks — the event loop holds tasks only
-# weakly, so an unreferenced create_task() can be GC'd before it delivers.
-_inflight: set[asyncio.Task] = set()
 
 # One shared client: reuses connections instead of a fresh TCP+TLS handshake
 # per delivery (same pattern as push.py's relay client).
@@ -102,10 +98,4 @@ async def _dispatch(event_type: str, data: dict) -> None:
 
 def dispatch_event(event_type: str, data: dict) -> None:
     """Schedule delivery to subscribers without blocking the caller."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return  # no event loop (e.g. a sync script); nothing to schedule onto
-    task = loop.create_task(_dispatch(event_type, data))
-    _inflight.add(task)
-    task.add_done_callback(_inflight.discard)
+    background.spawn(_dispatch(event_type, data), f"webhook dispatch of {event_type}")

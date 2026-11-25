@@ -1,15 +1,22 @@
 import uuid
 from datetime import timedelta
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import settings
-from ..db import get_db
+from ..access import (
+    can_access_space,
+    is_channel_manager,
+    is_space_manager,
+    require_channel_manager,
+    require_member,
+)
+from .. import events, storage, tasks
+from ..db import DB, after_commit, commit
 from ..deps import get_current_user
+from ..membership import channel_member_ids, ensure_channel_owner, space_member_ids
 from ..models import (
     THREAD_ACTIVE_DAYS,
     Channel,
@@ -20,7 +27,6 @@ from ..models import (
     Message,
     Reminder,
     Space,
-    SpaceMember,
     User,
     utcnow,
 )
@@ -35,187 +41,23 @@ from ..schemas import (
     NotifyPrefIn,
     UserOut,
 )
-
-
-from ..ws import manager
-
-# What members hear before they pick a per-channel preference.
-DEFAULT_NOTIFY_LEVEL = "all"
-
-# Unchecked task lines in a message body, counted in SQL. The "n" flag makes ^
-# anchor at each line start and keeps . from crossing a newline, matching the
-# per-line `^\[ \] .` the client renders as a checkbox. Requires Postgres 15+.
-OPEN_TASK_COUNT = func.regexp_count(Message.content, r"^\[ \] .", 1, "n")
+from ..vocab import DEFAULT_NOTIFY_LEVEL, ChannelRole
 
 router = APIRouter(prefix="/api/v1", tags=["channels"])
 
 
-async def require_member(
-    db: AsyncSession, channel_id: uuid.UUID, user: User
-) -> Channel:
-    channel = await db.get(Channel, channel_id)
-    member = await db.get(ChannelMember, (channel_id, user.id))
-    if channel is None or member is None:
-        # 404 for non-members too: don't reveal that a private channel exists.
-        raise HTTPException(404, "Channel not found")
-    return channel
-
-
-async def require_manageable(
-    db: AsyncSession, channel_id: uuid.UUID, user: User
-) -> Channel:
-    """Channel owner or a server admin; admins can manage channels they
-    aren't members of (it's their server)."""
-    channel = await db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(404, "Channel not found")
-    if user.is_admin:
-        return channel
-    member = await db.get(ChannelMember, (channel_id, user.id))
-    if member is None:
-        raise HTTPException(404, "Channel not found")
-    if member.role != "owner":
-        raise HTTPException(403, "Only the channel owner can do that")
-    return channel
-
-
-async def member_ids(db: AsyncSession, channel_id: uuid.UUID) -> list[uuid.UUID]:
-    return list(
-        (
-            await db.scalars(
-                select(ChannelMember.user_id).where(
-                    ChannelMember.channel_id == channel_id
-                )
-            )
-        ).all()
-    )
-
-
 async def channel_out(db: AsyncSession, channel: Channel, me: User) -> ChannelOut:
-    dm_user = None
-    dm_members: list[UserOut] = []
-    if channel.is_dm:
-        other_ids = (
-            await db.scalars(
-                select(ChannelMember.user_id).where(
-                    ChannelMember.channel_id == channel.id,
-                    ChannelMember.user_id != me.id,
-                )
-            )
-        ).all()
-        others = (
-            (await db.scalars(select(User).where(User.id.in_(other_ids)))).all()
-            if other_ids else []
-        )
-        if len(others) == 1:
-            dm_user = UserOut.model_validate(others[0])  # classic 1:1 DM
-        elif others:
-            dm_members = [UserOut.model_validate(o) for o in others]  # group DM
-    my_member = await db.get(ChannelMember, (channel.id, me.id))
-    # Counts mirror what the channel timeline shows: top-level (non-thread-reply),
-    # non-deleted messages. (Thread replies live in the thread view; counting
-    # them would show a number on a channel that looks empty.)
-    total = await db.scalar(
-        select(func.count())
-        .select_from(Message)
-        .where(
-            Message.channel_id == channel.id,
-            Message.deleted_at.is_(None),
-            Message.thread_root_id.is_(None),
-        )
-    )
-    # Trailing 7-day message count — a feel for the channel's *current* activity.
-    recent = await db.scalar(
-        select(func.count())
-        .select_from(Message)
-        .where(
-            Message.channel_id == channel.id,
-            Message.deleted_at.is_(None),
-            Message.thread_root_id.is_(None),
-            Message.created_at >= utcnow() - timedelta(days=7),
-        )
-    )
-    read = await db.get(ChannelRead, (channel.id, me.id))
-    unread_conds = [
-        Message.channel_id == channel.id,
-        Message.deleted_at.is_(None),
-        Message.sender_id != me.id,
-    ]
-    if read is not None:
-        unread_conds.append(Message.created_at > read.last_read_at)
-    unread = await db.scalar(
-        select(func.count()).select_from(Message).where(*unread_conds)
-    )
-    open_tasks = 0
-    if not channel.is_dm:
-        # Count unchecked task lines in SQL (regexp_count with the newline-
-        # sensitive flag so ^ anchors each line) instead of shipping every
-        # task-bearing message body to Python and re-parsing it per request.
-        open_tasks = (
-            await db.scalar(
-                select(func.coalesce(func.sum(OPEN_TASK_COUNT), 0)).where(
-                    Message.channel_id == channel.id,
-                    Message.deleted_at.is_(None),
-                    Message.content.ilike("%[ ] %"),
-                )
-            )
-        ) or 0
-    reminders = await db.scalar(
-        select(func.count())
-        .select_from(Reminder)
-        .where(
-            Reminder.user_id == me.id,
-            Reminder.channel_id == channel.id,
-            Reminder.fired_at.is_(None),
-        )
-    )
-    pinned = await db.scalar(
-        select(func.count())
-        .select_from(Message)
-        .where(
-            Message.channel_id == channel.id,
-            Message.deleted_at.is_(None),
-            Message.pinned_at.is_not(None),
-        )
-    )
-    # Active threads: distinct roots that have had a reply within the window.
-    cutoff = utcnow() - timedelta(days=THREAD_ACTIVE_DAYS)
-    active_threads = await db.scalar(
-        select(func.count(func.distinct(Message.thread_root_id))).where(
-            Message.channel_id == channel.id,
-            Message.thread_root_id.is_not(None),
-            Message.deleted_at.is_(None),
-            Message.created_at >= cutoff,
-        )
-    )
-    pref = await db.get(ChannelNotifyPref, (channel.id, me.id))
-    notify_level = pref.level if pref else DEFAULT_NOTIFY_LEVEL
-    return ChannelOut(
-        id=channel.id,
-        name=channel.name,
-        topic=channel.topic,
-        is_private=channel.is_private,
-        is_dm=channel.is_dm,
-        space_id=channel.space_id,
-        dm_user=dm_user,
-        dm_members=dm_members,
-        my_role=my_member.role if my_member else None,
-        message_count=total or 0,
-        recent_count=recent or 0,
-        unread_count=unread or 0,
-        open_task_count=open_tasks,
-        reminder_count=reminders or 0,
-        pinned_count=pinned or 0,
-        thread_count=active_threads or 0,
-        notify_level=notify_level,
-    )
+    """One channel, as the caller sees it. Deliberately the single-row case of
+    channels_out_bulk() so a count or field can never differ between an
+    endpoint that returns one channel and the sidebar listing."""
+    return (await channels_out_bulk(db, [channel], me))[0]
 
 
 @router.put("/channels/{channel_id}/notify", response_model=ChannelOut)
 async def set_notify_pref(
     channel_id: uuid.UUID,
     body: NotifyPrefIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> ChannelOut:
     channel = await require_member(db, channel_id, user)
@@ -237,7 +79,7 @@ async def set_notify_pref(
 @router.post("/channels/{channel_id}/read", status_code=204)
 async def mark_read(
     channel_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     await require_member(db, channel_id, user)
@@ -252,8 +94,8 @@ async def channels_out_bulk(
     db: AsyncSession, channels: list[Channel], me: User
 ) -> list[ChannelOut]:
     """Build ChannelOut for many channels with a fixed number of grouped queries
-    instead of ~9 per channel. Same output as channel_out(), used by the hot
-    my_channels listing."""
+    (not a handful per channel). The ONLY place a ChannelOut is assembled:
+    channel_out() is this function called with one channel."""
     if not channels:
         return []
     ids = [c.id for c in channels]
@@ -359,11 +201,11 @@ async def channels_out_bulk(
         # across all the user's channels and re-parse them in Python each time.
         for cid, n in (
             await db.execute(
-                select(Message.channel_id, func.sum(OPEN_TASK_COUNT))
+                select(Message.channel_id, func.sum(tasks.open_task_count(Message.content)))
                 .where(
                     Message.channel_id.in_(non_dm_ids),
                     Message.deleted_at.is_(None),
-                    Message.content.ilike("%[ ] %"),
+                    tasks.may_have_open_task(Message.content),
                 )
                 .group_by(Message.channel_id)
             )
@@ -429,7 +271,7 @@ async def channels_out_bulk(
 
 @router.get("/channels", response_model=list[ChannelOut])
 async def my_channels(
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+    db: AsyncSession = DB, user: User = Depends(get_current_user)
 ) -> list[ChannelOut]:
     channels = (
         await db.scalars(
@@ -445,11 +287,11 @@ async def my_channels(
 @router.get("/channels/browse", response_model=list[ChannelOut])
 async def browse_channels(
     space_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> list[ChannelOut]:
     # Only within a space the caller belongs to.
-    if not user.is_admin and await db.get(SpaceMember, (space_id, user.id)) is None:
+    if not await can_access_space(db, space_id, user):
         raise HTTPException(404, "Space not found")
     mine = select(ChannelMember.channel_id).where(ChannelMember.user_id == user.id)
     channels = (
@@ -470,7 +312,7 @@ async def browse_channels(
 @router.put("/channels/order", status_code=204)
 async def reorder_channels(
     body: ChannelOrderIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     """Set the top-to-bottom order of a space's channels (space manager or admin).
@@ -478,10 +320,8 @@ async def reorder_channels(
     space = await db.get(Space, body.space_id)
     if space is None:
         raise HTTPException(404, "Space not found")
-    if not user.is_admin:
-        member = await db.get(SpaceMember, (space.id, user.id))
-        if member is None or member.role != "manager":
-            raise HTTPException(403, "Only a space manager can reorder its channels")
+    if not await is_space_manager(db, space.id, user):
+        raise HTTPException(403, "Only a space manager can reorder its channels")
     # One statement instead of one UPDATE per channel: CASE maps each id to its
     # index. Scoped to this space so foreign ids in `order` are inert.
     positions = {cid: i for i, cid in enumerate(body.order)}
@@ -493,22 +333,19 @@ async def reorder_channels(
         )
     await db.flush()
     # The order is global, so nudge everyone in the space to re-sort their sidebar.
-    member_ids = (
-        await db.scalars(
-            select(SpaceMember.user_id).where(SpaceMember.space_id == space.id)
-        )
-    ).all()
-    await manager.send_to_users(member_ids, {"type": "channels.changed"})
+    events.publish(
+        db, await space_member_ids(db, space.id), {"type": "channels.changed"}
+    )
 
 
 @router.post("/channels", response_model=ChannelOut, status_code=201)
 async def create_channel(
     body: ChannelIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> ChannelOut:
     # Must be a member of the space the channel lives in.
-    if not user.is_admin and await db.get(SpaceMember, (body.space_id, user.id)) is None:
+    if not await can_access_space(db, body.space_id, user):
         raise HTTPException(403, "You are not a member of that space")
     name = body.name.strip()
     existing = await db.scalar(
@@ -534,20 +371,18 @@ async def create_channel(
         # Two requests raced past the check above; the unique index decides.
         await db.rollback()
         raise HTTPException(409, "A channel with that name already exists in this space")
-    db.add(ChannelMember(channel_id=channel.id, user_id=user.id, role="owner"))
+    db.add(
+        ChannelMember(channel_id=channel.id, user_id=user.id, role=ChannelRole.OWNER)
+    )
     # Public channels are visible to the whole space: enroll its members.
     if not body.is_private:
-        member_ids = (
-            await db.scalars(
-                select(SpaceMember.user_id).where(SpaceMember.space_id == body.space_id)
-            )
-        ).all()
+        member_ids = await space_member_ids(db, body.space_id)
         for member_id in member_ids:
             if member_id != user.id:
                 db.add(ChannelMember(channel_id=channel.id, user_id=member_id))
         await db.flush()
-        await manager.send_to_users(
-            [m for m in member_ids if m != user.id], {"type": "channels.changed"}
+        events.publish(
+            db, [m for m in member_ids if m != user.id], {"type": "channels.changed"}
         )
     return await channel_out(db, channel, user)
 
@@ -556,10 +391,10 @@ async def create_channel(
 async def update_channel(
     channel_id: uuid.UUID,
     body: ChannelUpdateIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> ChannelOut:
-    channel = await require_manageable(db, channel_id, user)
+    channel = await require_channel_manager(db, channel_id, user)
     if channel.is_dm:
         raise HTTPException(400, "DMs can't be renamed")
     if body.name is not None:
@@ -584,8 +419,9 @@ async def update_channel(
     except IntegrityError:
         await db.rollback()
         raise HTTPException(409, "A channel with that name already exists")
-    await manager.send_to_users(
-        await member_ids(db, channel_id),
+    events.publish(
+        db,
+        await channel_member_ids(db, channel_id),
         {"type": "channel.updated", "channel_id": str(channel_id)},
     )
     return await channel_out(db, channel, user)
@@ -595,20 +431,20 @@ async def update_channel(
 async def move_channel(
     channel_id: uuid.UUID,
     body: ChannelMoveIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> ChannelOut:
     """Move a channel to another space (owner or admin). Membership is
     reconciled to the destination space: a public channel picks up all of that
     space's members, and anyone no longer in the space is dropped, so nobody is
     left subscribed to a channel they can no longer see."""
-    channel = await require_manageable(db, channel_id, user)
+    channel = await require_channel_manager(db, channel_id, user)
     if channel.is_dm:
         raise HTTPException(400, "DMs don't belong to a space")
     space = await db.get(Space, body.space_id)
     if space is None:
         raise HTTPException(404, "Space not found")
-    if not user.is_admin and await db.get(SpaceMember, (space.id, user.id)) is None:
+    if not await can_access_space(db, space.id, user):
         raise HTTPException(403, "You must be a member of the destination space")
     if channel.space_id == space.id:
         return await channel_out(db, channel, user)
@@ -624,19 +460,13 @@ async def move_channel(
     if clash is not None:
         raise HTTPException(409, "A channel with that name already exists in that space")
 
-    old_members = set(await member_ids(db, channel_id))
+    old_members = set(await channel_member_ids(db, channel_id))
     channel.space_id = space.id
     max_pos = await db.scalar(
         select(func.max(Channel.position)).where(Channel.space_id == space.id)
     )
     channel.position = (max_pos or 0) + 1  # land at the bottom of the new space
-    dest_members = set(
-        (
-            await db.scalars(
-                select(SpaceMember.user_id).where(SpaceMember.space_id == space.id)
-            )
-        ).all()
-    )
+    dest_members = set(await space_member_ids(db, space.id))
     current = (
         await db.scalars(
             select(ChannelMember).where(ChannelMember.channel_id == channel.id)
@@ -656,24 +486,26 @@ async def move_channel(
             select(ChannelMember).where(ChannelMember.channel_id == channel.id)
         )
     ).all()
-    if not any(m.role == "owner" for m in remaining):
+    if not any(m.role == ChannelRole.OWNER for m in remaining):
         mine = await db.get(ChannelMember, (channel.id, user.id))
         if mine is None:
             db.add(
-                ChannelMember(channel_id=channel.id, user_id=user.id, role="owner")
+                ChannelMember(
+                    channel_id=channel.id, user_id=user.id, role=ChannelRole.OWNER
+                )
             )
         else:
-            mine.role = "owner"
+            mine.role = ChannelRole.OWNER
         await db.flush()
     affected = old_members | dest_members | {user.id}
-    await manager.send_to_users(list(affected), {"type": "channels.changed"})
+    events.publish(db, list(affected), {"type": "channels.changed"})
     return await channel_out(db, channel, user)
 
 
 @router.delete("/channels/{channel_id}", status_code=204)
 async def delete_channel(
     channel_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     # Deliberately admin-only (not channel owners): deletion destroys all
@@ -685,30 +517,30 @@ async def delete_channel(
         raise HTTPException(404, "Channel not found")
     if channel.is_dm:
         raise HTTPException(400, "DMs can't be deleted")
-    members = await member_ids(db, channel_id)
+    members = await channel_member_ids(db, channel_id)
     file_ids = (
         await db.scalars(select(File.id).where(File.channel_id == channel_id))
     ).all()
     await db.delete(channel)  # cascades members, messages, file rows
-    await db.commit()
-    for file_id in file_ids:
-        (Path(settings.upload_dir) / str(file_id)).unlink(missing_ok=True)
-    await manager.send_to_users(
-        members, {"type": "channel.deleted", "channel_id": str(channel_id)}
+    events.publish(
+        db, members, {"type": "channel.deleted", "channel_id": str(channel_id)}
     )
+    after_commit(db, storage.unlink_blobs, file_ids)
+    await commit(db)
 
 
 @router.post("/channels/{channel_id}/join", response_model=ChannelOut)
 async def join_channel(
     channel_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> ChannelOut:
     channel = await db.get(Channel, channel_id)
     if channel is None or channel.is_private or channel.is_dm:
         raise HTTPException(404, "Channel not found")
-    if (not user.is_admin and channel.space_id is not None
-            and await db.get(SpaceMember, (channel.space_id, user.id)) is None):
+    if channel.space_id is not None and not await can_access_space(
+        db, channel.space_id, user
+    ):
         raise HTTPException(404, "Channel not found")
     if await db.get(ChannelMember, (channel_id, user.id)) is None:
         db.add(ChannelMember(channel_id=channel_id, user_id=user.id))
@@ -718,7 +550,7 @@ async def join_channel(
 @router.get("/channels/{channel_id}/members", response_model=list[UserOut])
 async def list_members(
     channel_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> list[User]:
     await require_member(db, channel_id, user)
@@ -737,14 +569,13 @@ async def list_members(
 async def add_member(
     channel_id: uuid.UUID,
     body: MemberIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> User:
     channel = await require_member(db, channel_id, user)
     if channel.is_dm:
         raise HTTPException(400, "Cannot add members to a DM")
-    me = await db.get(ChannelMember, (channel_id, user.id))
-    if me.role != "owner" and not user.is_admin:
+    if not await is_channel_manager(db, channel_id, user):
         raise HTTPException(403, "Only the channel owner can add members")
     target = await db.get(User, body.user_id)
     if target is None or target.disabled:
@@ -752,85 +583,60 @@ async def add_member(
     # Keep the space boundary intact: a channel's members must belong to its
     # space (join_channel already enforces this; add_member didn't). Admins are
     # exempt, as elsewhere. Same 404 as join, so the check leaks nothing.
-    if (
-        channel.space_id is not None
-        and not target.is_admin
-        and await db.get(SpaceMember, (channel.space_id, target.id)) is None
+    if channel.space_id is not None and not await can_access_space(
+        db, channel.space_id, target
     ):
         raise HTTPException(404, "User not found")
     if await db.get(ChannelMember, (channel_id, target.id)) is None:
         db.add(ChannelMember(channel_id=channel_id, user_id=target.id))
         await db.flush()
-        await manager.send_to_users([target.id], {"type": "channels.changed"})
+        events.publish(db, [target.id], {"type": "channels.changed"})
     return target
 
 
 @router.delete("/channels/{channel_id}/members/me", status_code=204)
 async def leave_channel(
     channel_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
     channel = await require_member(db, channel_id, user)
     if channel.is_dm:
         raise HTTPException(400, "Cannot leave a DM")
     member = await db.get(ChannelMember, (channel_id, user.id))
-    was_owner = member.role == "owner"
+    was_owner = member.role == ChannelRole.OWNER
     await db.delete(member)
     await db.flush()
     if was_owner:
-        await _ensure_channel_owner(db, channel_id)
-
-
-async def _ensure_channel_owner(db: AsyncSession, channel_id: uuid.UUID) -> None:
-    """If a channel is left with members but no owner, the longest-standing
-    remaining member inherits the role, so routine management (members, rename,
-    webhooks) never needs an admin. An empty channel simply stays ownerless."""
-    has_owner = await db.scalar(
-        select(ChannelMember.user_id).where(
-            ChannelMember.channel_id == channel_id, ChannelMember.role == "owner"
-        ).limit(1)
-    )
-    if has_owner is not None:
-        return
-    heir = await db.scalar(
-        select(ChannelMember)
-        .where(ChannelMember.channel_id == channel_id)
-        .order_by(ChannelMember.joined_at, ChannelMember.user_id)
-        .limit(1)
-    )
-    if heir is not None:
-        heir.role = "owner"
-        await db.flush()
-        await manager.send_to_users([heir.user_id], {"type": "channels.changed"})
+        await ensure_channel_owner(db, channel_id)
 
 
 @router.delete("/channels/{channel_id}/members/{user_id}", status_code=204)
 async def remove_member(
     channel_id: uuid.UUID,
     user_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> None:
-    channel = await require_manageable(db, channel_id, user)
+    channel = await require_channel_manager(db, channel_id, user)
     if channel.is_dm:
         raise HTTPException(400, "Cannot remove members from a DM")
     member = await db.get(ChannelMember, (channel_id, user_id))
     if member is None:
         raise HTTPException(404, "Member not found")
-    if member.role == "owner" and not user.is_admin:
+    if member.role == ChannelRole.OWNER and not user.is_admin:
         raise HTTPException(403, "Only a server admin can remove the channel owner")
     await db.delete(member)
     await db.flush()
-    await manager.send_to_users(
-        [user_id], {"type": "channel.deleted", "channel_id": str(channel_id)}
+    events.publish(
+        db, [user_id], {"type": "channel.deleted", "channel_id": str(channel_id)}
     )
 
 
 @router.post("/dms", response_model=ChannelOut)
 async def open_dm(
     body: DMIn,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = DB,
     user: User = Depends(get_current_user),
 ) -> ChannelOut:
     """One target → a 1:1 DM; several → a group DM. Reuses an existing DM whose
@@ -874,7 +680,5 @@ async def open_dm(
     for mid in target_set:
         db.add(ChannelMember(channel_id=channel.id, user_id=mid))
     await db.flush()
-    await manager.send_to_users(
-        [t.id for t in targets], {"type": "channels.changed"}
-    )
+    events.publish(db, [t.id for t in targets], {"type": "channels.changed"})
     return await channel_out(db, channel, user)

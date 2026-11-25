@@ -4,7 +4,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db import get_db
+from .db import DB
 from .models import API_KEY_PREFIX, ApiKey
 from .models import Session as AuthSession
 from .models import User
@@ -65,7 +65,7 @@ async def user_from_token(db: AsyncSession, token: str | None) -> User | None:
     return user
 
 
-async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
+async def get_current_user(request: Request, db: AsyncSession = DB) -> User:
     auth = request.headers.get("authorization", "")
     token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else None
     user = await user_from_token(db, token)
